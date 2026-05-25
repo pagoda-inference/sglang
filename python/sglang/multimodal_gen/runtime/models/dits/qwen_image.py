@@ -32,8 +32,9 @@ from sglang.multimodal_gen.runtime.layers.layernorm import (
     apply_qk_norm_with_optional_rope,
 )
 from sglang.multimodal_gen.runtime.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
-    ReplicatedLinear,
+    RowParallelLinear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -531,24 +532,27 @@ class QwenImageCrossAttention(nn.Module):
                 prefix=f"{prefix}.to_qkv",
             )
         else:
-            self.to_q = ReplicatedLinear(
+            self.to_q = ColumnParallelLinear(
                 dim,
                 self.inner_dim,
                 bias=True,
+                gather_output=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_q",
             )
-            self.to_k = ReplicatedLinear(
+            self.to_k = ColumnParallelLinear(
                 dim,
                 self.inner_dim,
                 bias=True,
+                gather_output=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_k",
             )
-            self.to_v = ReplicatedLinear(
+            self.to_v = ColumnParallelLinear(
                 dim,
                 self.inner_dim,
                 bias=True,
+                gather_output=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_v",
             )
@@ -568,33 +572,38 @@ class QwenImageCrossAttention(nn.Module):
                     prefix=f"{prefix}.to_added_qkv",
                 )
             else:
-                self.add_q_proj = ReplicatedLinear(
+                self.add_q_proj = ColumnParallelLinear(
                     added_kv_proj_dim,
                     self.inner_dim,
                     bias=True,
+                    gather_output=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.add_q_proj",
                 )
-                self.add_k_proj = ReplicatedLinear(
+                self.add_k_proj = ColumnParallelLinear(
                     added_kv_proj_dim,
                     self.inner_dim,
                     bias=True,
+                    gather_output=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.add_k_proj",
                 )
-                self.add_v_proj = ReplicatedLinear(
+                self.add_v_proj = ColumnParallelLinear(
                     added_kv_proj_dim,
                     self.inner_dim,
                     bias=True,
+                    gather_output=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.add_v_proj",
                 )
 
         if context_pre_only is not None and not context_pre_only:
-            self.to_add_out = ReplicatedLinear(
+            self.to_add_out = RowParallelLinear(
                 self.inner_dim,
                 self.dim,
                 bias=out_bias,
+                input_is_parallel=False,
+                reduce_results=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_add_out",
             )
@@ -604,10 +613,12 @@ class QwenImageCrossAttention(nn.Module):
         if not pre_only:
             self.to_out = nn.ModuleList([])
             self.to_out.append(
-                ReplicatedLinear(
+                RowParallelLinear(
                     self.inner_dim,
                     self.dim,
                     bias=out_bias,
+                    input_is_parallel=False,
+                    reduce_results=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.to_out.0",
                 )
@@ -760,10 +771,11 @@ class QwenImageGELU(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.proj = ReplicatedLinear(
+        self.proj = ColumnParallelLinear(
             dim,
             inner_dim,
             bias=True,
+            gather_output=False,
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
@@ -793,10 +805,12 @@ class QwenImageFeedForward(nn.Module):
                     prefix=f"{prefix}.net.0",
                 ),
                 nn.Dropout(0.0),
-                ReplicatedLinear(
+                RowParallelLinear(
                     inner_dim,
                     dim_out,
                     bias=True,
+                    input_is_parallel=True,
+                    reduce_results=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.net.2",
                 ),
@@ -834,10 +848,11 @@ class QwenImageTransformerBlock(nn.Module):
         # Image processing modules
         self.img_mod = nn.Sequential(
             nn.SiLU(),
-            ReplicatedLinear(
+            ColumnParallelLinear(
                 dim,
                 6 * dim,
                 bias=True,
+                gather_output=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.img_mod",
             ),  # For scale, shift, gate for norm1 and norm2
@@ -862,10 +877,11 @@ class QwenImageTransformerBlock(nn.Module):
         # Text processing modules
         self.txt_mod = nn.Sequential(
             nn.SiLU(),
-            ReplicatedLinear(
+            ColumnParallelLinear(
                 dim,
                 6 * dim,
                 bias=True,
+                gather_output=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.txt_mod",
             ),  # For scale, shift, gate for norm1 and norm2
@@ -1232,20 +1248,8 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         self.txt_norm = RMSNorm(joint_attention_dim, eps=1e-6)
 
-        self.img_in = ReplicatedLinear(
-            in_channels,
-            self.inner_dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix="img_in",
-        )
-        self.txt_in = ReplicatedLinear(
-            joint_attention_dim,
-            self.inner_dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix="txt_in",
-        )
+        self.img_in = nn.Linear(in_channels, self.inner_dim)
+        self.txt_in = nn.Linear(joint_attention_dim, self.inner_dim)
 
         self.transformer_blocks = nn.ModuleList(
             [
@@ -1264,12 +1268,8 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         self.norm_out = AdaLayerNormContinuous(
             self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6
         )
-        self.proj_out = ReplicatedLinear(
-            self.inner_dim,
-            patch_size * patch_size * self.out_channels,
-            bias=True,
-            quant_config=quant_config,
-            prefix="proj_out",
+        self.proj_out = nn.Linear(
+            self.inner_dim, patch_size * patch_size * self.out_channels, bias=True
         )
 
         self.timestep_zero = torch.zeros(
@@ -1354,7 +1354,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         if isinstance(encoder_hidden_states_mask, list):
             encoder_hidden_states_mask = encoder_hidden_states_mask[0]
 
-        hidden_states, _ = self.img_in(hidden_states)
+        hidden_states = self.img_in(hidden_states)
 
         timestep = (timestep / 1000).to(hidden_states.dtype)
 
@@ -1366,7 +1366,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
             modulate_index = None
 
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
-        encoder_hidden_states, _ = self.txt_in(encoder_hidden_states)
+        encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
         block_attention_kwargs = attention_kwargs.copy() if attention_kwargs else {}
         if encoder_hidden_states_mask is not None:
@@ -1419,7 +1419,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb_txt)
 
-        output, _ = self.proj_out(hidden_states)
+        output = self.proj_out(hidden_states)
         return output
 
 
