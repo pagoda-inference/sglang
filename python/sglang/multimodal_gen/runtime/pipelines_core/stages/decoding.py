@@ -14,6 +14,9 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.vae_loader import VA
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
 )
+from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
+    configure_layerwise_offload_modules,
+)
 from sglang.multimodal_gen.runtime.models.vaes.common import ParallelTiledVAE
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
@@ -76,12 +79,19 @@ class DecodingStage(PipelineStage):
     ) -> list[ComponentUse]:
         vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
         stage_name = self._component_stage_name(stage_name)
+        keep_ready_after_warmup = not (
+            bool(server_args.vae_cpu_offload)
+            or server_args.should_configure_layerwise_offload_for_lazy_component(
+                self.component_name
+            )
+        )
         return [
             ComponentUse(
                 stage_name,
                 self.component_name,
                 target_dtype=vae_dtype,
-                keep_ready_after_warmup=True,
+                keep_ready_after_warmup=keep_ready_after_warmup,
+                memory_intensive=True,
             )
         ]
 
@@ -194,6 +204,15 @@ class DecodingStage(PipelineStage):
             )
             if pipeline:
                 pipeline.add_module(self.component_name, self.vae)
+            if self.server_args.should_configure_layerwise_offload_for_lazy_component(
+                self.component_name
+            ):
+                configure_layerwise_offload_modules(
+                    {self.component_name: self.vae},
+                    self.server_args,
+                    component_names=self.server_args.layerwise_offload_components,
+                    warn_missing=False,
+                )
             self.server_args.model_loaded[self.component_name] = True
 
     @torch.no_grad()

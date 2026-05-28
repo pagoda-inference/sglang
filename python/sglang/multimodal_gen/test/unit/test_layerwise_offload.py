@@ -166,6 +166,45 @@ def _server_args(**kwargs):
     return SimpleNamespace(**defaults)
 
 
+def test_layerwise_offload_disables_pinned_memory_on_npu(monkeypatch):
+    monkeypatch.setattr(
+        layerwise_offload_mod.torch, "get_device_module", lambda: _FakeDeviceModule
+    )
+    monkeypatch.setattr(layerwise_offload_mod.current_platform, "device_type", "cpu")
+    monkeypatch.setattr(layerwise_offload_mod.current_platform, "is_npu", lambda: True)
+
+    manager = LayerwiseOffloadManager(
+        model=_DummyModel(),
+        layers_attr_str="blocks",
+        num_layers=1,
+        enabled=True,
+        pin_cpu_memory=True,
+        prefetch_size=1,
+    )
+
+    assert manager.enabled
+    assert manager.pin_cpu_memory is False
+
+
+def test_layerwise_offload_keeps_pinned_memory_on_non_npu(monkeypatch):
+    monkeypatch.setattr(
+        layerwise_offload_mod.torch, "get_device_module", lambda: _FakeDeviceModule
+    )
+    monkeypatch.setattr(layerwise_offload_mod.current_platform, "device_type", "cpu")
+    monkeypatch.setattr(layerwise_offload_mod.current_platform, "is_npu", lambda: False)
+
+    manager = LayerwiseOffloadManager(
+        model=_DummyModel(),
+        layers_attr_str="blocks",
+        num_layers=1,
+        enabled=True,
+        pin_cpu_memory=True,
+        prefetch_size=1,
+    )
+
+    assert manager.pin_cpu_memory is True
+
+
 def test_layerwise_offload_preserves_non_contiguous_stride(monkeypatch):
     monkeypatch.setattr(
         layerwise_offload_mod.torch, "get_device_module", lambda: _FakeDeviceModule

@@ -46,7 +46,11 @@ class LayerwiseOffloadManager:
         self.model = model
         self.layers_attr_str = layers_attr_str
         self.num_layers = num_layers
-        self.pin_cpu_memory = pin_cpu_memory
+        self.pin_cpu_memory = bool(
+            pin_cpu_memory
+            and torch.get_device_module().is_available()
+            and not current_platform.is_npu()
+        )
         self.prefetch_size = min(max(1, prefetch_size), self.num_layers)
         self.enabled = bool(enabled and torch.get_device_module().is_available())
         if not self.enabled:
@@ -532,8 +536,10 @@ class LayerwiseOffloadManager:
 
                 # trigger batch prefetch (i + prefetch_size ~ i + 2 * prefetch_size) if needed
                 if i % self.prefetch_size == 0:
-                    for j in range(i + self.prefetch_size, i + 2 * self.prefetch_size):
-                        layer_to_prefetch = j % self.num_layers
+                    for layer_to_prefetch in range(
+                        i + self.prefetch_size,
+                        min(i + 2 * self.prefetch_size, self.num_layers),
+                    ):
                         self.prefetch_layer(layer_to_prefetch, non_blocking=True)
 
             return hook

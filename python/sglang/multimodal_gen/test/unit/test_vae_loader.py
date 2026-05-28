@@ -5,6 +5,7 @@ import torch
 
 from sglang.multimodal_gen.runtime.loader.component_loaders import vae_loader
 from sglang.multimodal_gen.runtime.loader.component_loaders.vae_loader import (
+    VAELoader,
     _backfill_ltx2_audio_vae_latent_stats,
     _should_use_channels_last_3d,
 )
@@ -12,9 +13,17 @@ from sglang.multimodal_gen.runtime.models.vaes.parallel import wan_common_utils
 
 
 class _FakeServerArgs:
-    def __init__(self, pipeline_config, num_gpus=1):
+    def __init__(
+        self,
+        pipeline_config,
+        num_gpus=1,
+        layerwise_offload_components=None,
+        vae_cpu_offload=False,
+    ):
         self.pipeline_config = pipeline_config
         self.num_gpus = num_gpus
+        self.layerwise_offload_components = layerwise_offload_components
+        self.vae_cpu_offload = vae_cpu_offload
 
 
 class QwenImagePipelineConfig:
@@ -38,6 +47,35 @@ class LTX2PipelineConfig:
 
 
 class TestVAELoader(unittest.TestCase):
+    def test_layerwise_vae_load_uses_cpu_staging_for_default_vae(self):
+        server_args = _FakeServerArgs(
+            QwenImagePipelineConfig(), layerwise_offload_components=["default"]
+        )
+
+        kwargs = VAELoader().customized_load_kwargs_for_component(server_args, "vae")
+
+        self.assertEqual(kwargs, {"cpu_offload_flag": True})
+
+    def test_layerwise_vae_load_skips_explicit_audio_vae_default_policy(self):
+        server_args = _FakeServerArgs(
+            QwenImagePipelineConfig(), layerwise_offload_components=["default"]
+        )
+
+        kwargs = VAELoader().customized_load_kwargs_for_component(
+            server_args, "audio_vae"
+        )
+
+        self.assertEqual(kwargs, {})
+
+    def test_layerwise_vae_load_skips_unselected_vae(self):
+        server_args = _FakeServerArgs(
+            QwenImagePipelineConfig(), layerwise_offload_components=["text_encoder"]
+        )
+
+        kwargs = VAELoader().customized_load_kwargs_for_component(server_args, "vae")
+
+        self.assertEqual(kwargs, {})
+
     def test_backfill_ltx2_audio_vae_latent_stats_maps_official_keys(self):
         loaded = {
             "per_channel_statistics.mean-of-means": torch.tensor([1.0, 2.0]),

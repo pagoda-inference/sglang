@@ -95,8 +95,25 @@ class VAELoader(ComponentLoader):
     ):
         return server_args.vae_cpu_offload
 
+    def customized_load_kwargs_for_component(
+        self, server_args: ServerArgs, component_name: str
+    ) -> dict[str, bool]:
+        if ComponentLoader._is_component_set_as_layerwise_load(
+            server_args, component_name
+        ):
+            logger.info(
+                "Loading %s on CPU first because it is selected for layerwise offload",
+                component_name,
+            )
+            return {"cpu_offload_flag": True}
+        return {}
+
     def load_customized(
-        self, component_model_path: str, server_args: ServerArgs, component_name: str
+        self,
+        component_model_path: str,
+        server_args: ServerArgs,
+        component_name: str,
+        cpu_offload_flag: bool | None = None,
     ):
         """Load the VAE based on the model path, and inference args."""
         config = get_diffusers_component_config(component_path=component_model_path)
@@ -124,7 +141,11 @@ class VAELoader(ComponentLoader):
             # NOTE: some post init logics are only available after updated with config
             vae_config.post_init()
 
-        should_offload = self.should_offload(server_args)
+        should_offload = (
+            cpu_offload_flag
+            if cpu_offload_flag is not None
+            else self.should_offload(server_args)
+        )
         target_device = self.target_device(should_offload)
 
         # Check for auto_map first (custom VAE classes)

@@ -303,6 +303,14 @@ class TestOffloadDefaults(unittest.TestCase):
                 return_value=True,
             ),
             patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.is_npu",
+                return_value=False,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args_auto_tune.current_platform.is_npu",
+                return_value=False,
+            ),
+            patch(
                 "sglang.multimodal_gen.runtime.server_args.current_platform.enable_dit_layerwise_offload_for_wan_by_default",
                 return_value=True,
             ),
@@ -498,6 +506,53 @@ class TestOffloadDefaults(unittest.TestCase):
         self.assertTrue(args.layerwise_offload_components)
         self.assertFalse(args.text_encoder_cpu_offload)
         self.assertFalse(args.image_encoder_cpu_offload)
+        self.assertEqual(
+            args.layerwise_offload_components,
+            ["text_encoder", "image_encoder", "vae"],
+        )
+
+    def test_auto_npu_uses_default_layerwise_offload(self):
+        with (
+            patch.object(
+                PipelineConfig, "from_kwargs", return_value=QwenImagePipelineConfig()
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.is_cpu",
+                return_value=False,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.is_mps",
+                return_value=False,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.is_cuda",
+                return_value=False,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.is_npu",
+                return_value=True,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args_auto_tune.current_platform.is_cuda",
+                return_value=False,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args_auto_tune.current_platform.is_npu",
+                return_value=True,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.get_device_total_memory",
+                return_value=80 * 1024**3,
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.server_args.current_platform.get_available_gpu_memory",
+                return_value=80,
+            ),
+        ):
+            args = ServerArgs.from_dict(
+                {"model_path": "/fake", "performance_mode": "auto"}
+            )
+
         self.assertEqual(
             args.layerwise_offload_components,
             ["text_encoder", "image_encoder", "vae"],
