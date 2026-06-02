@@ -126,6 +126,59 @@ class DecodingStage(PipelineStage):
                 latents += shift_factor
         return latents
 
+    def _free_decode_memory(self) -> None:
+        pipeline = self.pipeline() if self.pipeline else None
+        if pipeline is not None:
+            for name, module in pipeline.modules.items():
+                if name == self.component_name or module is self.vae:
+                    continue
+                if isinstance(module, torch.nn.Module):
+                    module.to("cpu")
+        if torch.get_device_module().is_available():
+            torch.get_device_module().synchronize()
+            torch.get_device_module().empty_cache()
+
+    def _decode_once(
+        self,
+        latents: torch.Tensor,
+        server_args: ServerArgs,
+        vae_dtype: torch.dtype,
+        vae_autocast_enabled: bool,
+    ) -> torch.Tensor:
+        if not vae_autocast_enabled:
+            latents = latents.to(vae_dtype)
+        decode_output = self.vae.decode(latents)
+        return _ensure_tensor_decode_output(decode_output)
+
+    def _decode_latents(
+        self,
+        latents: torch.Tensor,
+        server_args: ServerArgs,
+        vae_dtype: torch.dtype,
+        vae_autocast_enabled: bool,
+    ) -> torch.Tensor:
+        if not server_args.pipeline_config.vae_slicing or latents.ndim != 5:
+            return self._decode_once(
+                latents, server_args, vae_dtype, vae_autocast_enabled
+            )
+
+        if latents.shape[2] <= 1:
+            return self._decode_once(
+                latents, server_args, vae_dtype, vae_autocast_enabled
+            )
+
+        frames = []
+        for i in range(latents.shape[2]):
+            frames.append(
+                self._decode_once(
+                    latents[:, :, i : i + 1],
+                    server_args,
+                    vae_dtype,
+                    vae_autocast_enabled,
+                )
+            )
+        return torch.cat(frames, dim=2)
+
     @torch.no_grad()
     def decode(
         self,
@@ -172,10 +225,9 @@ class DecodingStage(PipelineStage):
                     self.vae.enable_tiling()
             except Exception:
                 pass
-            if not vae_autocast_enabled:
-                latents = latents.to(vae_dtype)
-            decode_output = self.vae.decode(latents)
-            image = _ensure_tensor_decode_output(decode_output)
+            image = self._decode_latents(
+                latents, server_args, vae_dtype, vae_autocast_enabled
+            )
 
         # De-normalize image to [0, 1] range
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -220,6 +272,18 @@ class DecodingStage(PipelineStage):
         ) as vae:
             assert vae is not None
             self.vae = vae
+
+            batch.noise_pred = None
+            batch.prompt_embeds = []
+            batch.negative_prompt_embeds = None
+            batch.prompt_attention_mask = None
+            batch.negative_attention_mask = None
+            batch.prompt_embeds_mask = None
+            batch.negative_prompt_embeds_mask = None
+            if torch.get_device_module().is_available():
+                torch.get_device_module().synchronize()
+                torch.get_device_module().empty_cache()
+            self._free_decode_memory()
 
             frames = self.decode(batch.latents, server_args, vae_dtype=vae_dtype)
 
