@@ -48,6 +48,17 @@ class MulAdd(CustomOp):
     def forward_npu(
         self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, k: int = 0
     ):
+        # sgl_kernel_npu fused_scale_shift only supports scale as a scalar or
+        # hidden-size vector. Qwen image edit/i2i zero-cond modulation can
+        # produce per-token gates [batch_size, seq_len, inner_dim].
+        if b.numel() not in (1, a.shape[-1]):
+            if k == 0:
+                out = a * b
+            else:
+                out = a * (k + b)
+            out.add_(c)
+            return out
+
         from sgl_kernel_npu.norm.scale_shift import fused_scale_shift
 
         return fused_scale_shift(a, b, c, scale_constant=k)
