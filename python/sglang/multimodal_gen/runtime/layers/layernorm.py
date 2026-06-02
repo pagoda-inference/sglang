@@ -127,11 +127,9 @@ class RMSNorm(CustomOp):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if not x.is_contiguous():
             x = x.contiguous()
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
         if residual is not None:
-            x = x + residual.to(torch.float32)
-            residual = x.to(orig_dtype)
+            x = x + residual
+            residual = x
 
         hidden_size = x.shape[-1]
         if hidden_size != self.hidden_size:
@@ -153,7 +151,8 @@ class RMSNorm(CustomOp):
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
+        weight = self._get_weight(x.dtype)
+        x = x * weight
         if residual is None:
             return x
         else:
@@ -387,44 +386,40 @@ class LayerNorm(CustomOp):
 # NOTE(will): Needed to match behavior of diffusers and wan2.1 even while using
 # FSDP's MixedPrecisionPolicy
 class FP32LayerNorm(nn.LayerNorm):
-    def _cached_fp32_param(
-        self, attr: str, param: torch.Tensor | None, device: torch.device
+    def _param_for_input(
+        self, attr: str, param: torch.Tensor | None, inputs: torch.Tensor
     ) -> torch.Tensor | None:
         if param is None:
             return None
 
-        # Keep autograd semantics identical to the old path. The diffusion
-        # runtime enters here for inference, where grad is disabled.
-        if torch.is_grad_enabled():
-            return param.float().to(device=device)
+        if param.device == inputs.device and param.dtype == inputs.dtype:
+            return param
 
         key = (
             param.data_ptr(),
             param._version,
             param.device,
-            device,
-            param.dtype,
+            inputs.device,
+            inputs.dtype,
         )
         cache = self.__dict__.get(attr)
         if cache is not None and cache[0] == key:
             return cache[1]
 
-        fp32_param = param.detach().to(device=device, dtype=torch.float32)
-        self.__dict__[attr] = (key, fp32_param)
-        return fp32_param
+        typed_param = param.detach().to(device=inputs.device, dtype=inputs.dtype)
+        self.__dict__[attr] = (key, typed_param)
+        return typed_param
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        origin_dtype = inputs.dtype
-        device = inputs.device
-        weight = self._cached_fp32_param("_weight_fp32_cache", self.weight, device)
-        bias = self._cached_fp32_param("_bias_fp32_cache", self.bias, device)
+        weight = self._param_for_input("_weight_dtype_cache", self.weight, inputs)
+        bias = self._param_for_input("_bias_dtype_cache", self.bias, inputs)
         return F.layer_norm(
-            inputs.float(),
+            inputs,
             self.normalized_shape,
             weight,
             bias,
             self.eps,
-        ).to(origin_dtype)
+        )
 
 
 ################################################################################
@@ -974,22 +969,20 @@ def apply_rmsnorm_tanh_mul_add(
 def tensor_parallel_rms_norm(x: torch.Tensor, norm: "RMSNorm") -> torch.Tensor:
     tp_rank = get_tensor_model_parallel_rank()
     tp_size = get_tensor_model_parallel_world_size()
-    src_dtype = x.dtype
-    weight = norm.weight.tensor_split(tp_size)[tp_rank].float()
-    x_fp32 = x.float()
+    weight = norm.weight.tensor_split(tp_size)[tp_rank].to(dtype=x.dtype)
     if _is_npu:
         from sgl_kernel_npu.norm.rmsnorm_split import fused_rsqrt_mul, fused_variance
 
-        variance = fused_variance(x_fp32)
+        variance = fused_variance(x)
     else:
-        variance = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
 
     variance = get_tp_group().all_reduce(
         variance, op=torch._C._distributed_c10d.ReduceOp.AVG
     )
 
     if _is_npu:
-        output = fused_rsqrt_mul(x_fp32, variance, weight, norm.variance_epsilon)
+        output = fused_rsqrt_mul(x, variance, weight, norm.variance_epsilon)
     else:
-        output = x_fp32 * torch.rsqrt(variance + norm.variance_epsilon) * weight
-    return output.to(dtype=src_dtype)
+        output = x * torch.rsqrt(variance + norm.variance_epsilon) * weight
+    return output

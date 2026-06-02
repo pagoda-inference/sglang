@@ -157,27 +157,7 @@ class DecodingStage(PipelineStage):
         vae_dtype: torch.dtype,
         vae_autocast_enabled: bool,
     ) -> torch.Tensor:
-        if not server_args.pipeline_config.vae_slicing or latents.ndim != 5:
-            return self._decode_once(
-                latents, server_args, vae_dtype, vae_autocast_enabled
-            )
-
-        if latents.shape[2] <= 1:
-            return self._decode_once(
-                latents, server_args, vae_dtype, vae_autocast_enabled
-            )
-
-        frames = []
-        for i in range(latents.shape[2]):
-            frames.append(
-                self._decode_once(
-                    latents[:, :, i : i + 1],
-                    server_args,
-                    vae_dtype,
-                    vae_autocast_enabled,
-                )
-            )
-        return torch.cat(frames, dim=2)
+        return self._decode_once(latents, server_args, vae_dtype, vae_autocast_enabled)
 
     @torch.no_grad()
     def decode(
