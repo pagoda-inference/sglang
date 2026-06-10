@@ -150,6 +150,88 @@ class FeedForward(nn.Module):
         return out
 
 
+class ZImagePaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
+    """Merged column-parallel linear with zero-padded output shards.
+
+    Z-Image has 30 attention heads, which is not divisible by some TP sizes
+    (for example 4). This layer allocates padded Q/K/V output sizes for TP
+    divisibility, while loading the original checkpoint rows into the matching
+    local shard and leaving padded rows as zeros.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        original_output_sizes: list[int],
+        **kwargs,
+    ):
+        self.original_output_sizes = original_output_sizes
+        super().__init__(input_size, output_sizes, **kwargs)
+
+    def weight_loader(
+        self,
+        param,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: int | None = None,
+    ) -> None:
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is None:
+            super().weight_loader(param, loaded_weight, loaded_shard_id)
+            return
+
+        param_data = param.data
+        if loaded_shard_id is None:
+            loaded_offset = 0
+            for shard_id, original_size in enumerate(self.original_output_sizes):
+                loaded_weight_shard = loaded_weight.narrow(
+                    output_dim, loaded_offset, original_size
+                )
+                self.weight_loader(param, loaded_weight_shard, shard_id)
+                loaded_offset += original_size
+            return
+
+        padded_shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+        local_shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        param_shard = param_data.narrow(
+            output_dim, local_shard_offset, padded_shard_size
+        )
+        param_shard.zero_()
+
+        original_size = self.original_output_sizes[loaded_shard_id]
+        global_start = self.tp_rank * padded_shard_size
+        if global_start >= original_size:
+            return
+        copy_size = min(padded_shard_size, original_size - global_start)
+        loaded_shard = loaded_weight.narrow(output_dim, global_start, copy_size)
+        param_shard.narrow(output_dim, 0, copy_size).copy_(loaded_shard)
+
+
+class ZImagePaddedRowParallelLinear(RowParallelLinear):
+    """Row-parallel linear with zero-padded input columns for padded heads."""
+
+    def __init__(self, *args, original_input_size: int, **kwargs):
+        self.original_input_size = original_input_size
+        super().__init__(*args, **kwargs)
+
+    def weight_loader(self, param, loaded_weight: torch.Tensor):
+        input_dim = getattr(param, "input_dim", None)
+        if input_dim is None:
+            super().weight_loader(param, loaded_weight)
+            return
+
+        param_data = param.data
+        param_data.zero_()
+
+        shard_size = param_data.shape[input_dim]
+        global_start = self.tp_rank * shard_size
+        if global_start >= self.original_input_size:
+            return
+        copy_size = min(shard_size, self.original_input_size - global_start)
+        loaded_shard = loaded_weight.narrow(input_dim, global_start, copy_size)
+        param_data.narrow(input_dim, 0, copy_size).copy_(loaded_shard)
+
+
 class ZImageAttention(nn.Module):
     def __init__(
         self,
@@ -169,31 +251,65 @@ class ZImageAttention(nn.Module):
         self.qk_norm = qk_norm
 
         tp_size = get_tp_world_size()
-        assert (
-            num_heads % tp_size == 0
-        ), f"num_heads {num_heads} must be divisible by tp world size {tp_size}"
-        assert (
-            num_kv_heads % tp_size == 0
-        ), f"num_kv_heads {num_kv_heads} must be divisible by tp world size {tp_size}"
-        self.local_num_heads = num_heads // tp_size
-        self.local_num_kv_heads = num_kv_heads // tp_size
-
-        kv_dim = self.head_dim * num_kv_heads
+        self.orig_num_heads = num_heads
+        self.orig_num_kv_heads = num_kv_heads
+        self.padded_num_heads = self._ceil_to_multiple(num_heads, tp_size)
+        self.padded_num_kv_heads = self._ceil_to_multiple(num_kv_heads, tp_size)
+        self.num_padded_heads = self.padded_num_heads - num_heads
+        self.num_padded_kv_heads = self.padded_num_kv_heads - num_kv_heads
+        self.local_num_heads = self.padded_num_heads // tp_size
+        self.local_num_kv_heads = self.padded_num_kv_heads // tp_size
+        self.padded_dim = self.padded_num_heads * self.head_dim
+        kv_dim = self.padded_num_kv_heads * self.head_dim
+        original_kv_dim = self.orig_num_kv_heads * self.head_dim
+        self.needs_head_padding = (
+            self.num_padded_heads > 0 or self.num_padded_kv_heads > 0
+        )
         self.use_fused_qkv = True
 
+        if self.needs_head_padding and quant_config is not None:
+            raise NotImplementedError(
+                "Z-Image padded-head tensor parallelism currently supports "
+                "unquantized weights only. Use a TP size that divides the "
+                "number of heads, or disable quantization."
+            )
+
+        if self.needs_head_padding:
+            logger.info(
+                "Padding Z-Image attention heads for TP: q %s -> %s, kv %s -> %s, tp_size=%s",
+                self.orig_num_heads,
+                self.padded_num_heads,
+                self.orig_num_kv_heads,
+                self.padded_num_kv_heads,
+                tp_size,
+            )
+
         if self.use_fused_qkv:
-            self.to_qkv = MergedColumnParallelLinear(
+            linear_cls = (
+                ZImagePaddedMergedColumnParallelLinear
+                if self.needs_head_padding
+                else MergedColumnParallelLinear
+            )
+            kwargs = {}
+            if self.needs_head_padding:
+                kwargs["original_output_sizes"] = [
+                    dim,
+                    original_kv_dim,
+                    original_kv_dim,
+                ]
+            self.to_qkv = linear_cls(
                 dim,
-                [dim, kv_dim, kv_dim],
+                [self.padded_dim, kv_dim, kv_dim],
                 bias=False,
                 gather_output=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_qkv",
+                **kwargs,
             )
         else:
             self.to_q = ColumnParallelLinear(
                 dim,
-                dim,
+                self.padded_dim,
                 bias=False,
                 gather_output=False,
                 quant_config=quant_config,
@@ -223,15 +339,25 @@ class ZImageAttention(nn.Module):
             self.norm_q = None
             self.norm_k = None
 
+        out_linear_cls = (
+            ZImagePaddedRowParallelLinear
+            if self.needs_head_padding
+            else RowParallelLinear
+        )
+        out_kwargs = {}
+        if self.needs_head_padding:
+            out_kwargs["original_input_size"] = dim
+
         self.to_out = nn.ModuleList(
             [
-                RowParallelLinear(
-                    dim,
+                out_linear_cls(
+                    self.padded_dim,
                     dim,
                     bias=False,
                     input_is_parallel=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.to_out.0",
+                    **out_kwargs,
                 )
             ]
         )
@@ -251,6 +377,24 @@ class ZImageAttention(nn.Module):
             softmax_scale=None,
             causal=False,
         )
+
+    @staticmethod
+    def _ceil_to_multiple(value: int, multiple: int) -> int:
+        return int(math.ceil(value / multiple) * multiple)
+
+    def _zero_padded_heads(
+        self, tensor: torch.Tensor, original_heads: int
+    ) -> torch.Tensor:
+        tp_rank = self.to_out[0].tp_rank
+        local_heads = tensor.shape[-2]
+        global_head_start = tp_rank * local_heads
+        if global_head_start >= original_heads:
+            tensor.zero_()
+            return tensor
+        valid_heads = min(local_heads, original_heads - global_head_start)
+        if valid_heads < local_heads:
+            tensor[..., valid_heads:, :].zero_()
+        return tensor
 
     def forward(
         self,
@@ -280,6 +424,10 @@ class ZImageAttention(nn.Module):
         q = q.view(*q.shape[:-1], self.local_num_heads, self.head_dim)
         k = k.view(*k.shape[:-1], self.local_num_kv_heads, self.head_dim)
         v = v.view(*v.shape[:-1], self.local_num_kv_heads, self.head_dim)
+        if self.needs_head_padding:
+            q = self._zero_padded_heads(q, self.orig_num_heads)
+            k = self._zero_padded_heads(k, self.orig_num_kv_heads)
+            v = self._zero_padded_heads(v, self.orig_num_kv_heads)
 
         if freqs_cis is not None:
             cos, sin = freqs_cis
@@ -327,6 +475,11 @@ class ZImageAttention(nn.Module):
                 head_dim=self.head_dim,
                 allow_inplace=True,
             )
+
+        if self.needs_head_padding:
+            q = self._zero_padded_heads(q, self.orig_num_heads)
+            k = self._zero_padded_heads(k, self.orig_num_kv_heads)
+            v = self._zero_padded_heads(v, self.orig_num_kv_heads)
 
         if (
             num_replicated_suffix > 0

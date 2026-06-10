@@ -76,6 +76,8 @@ class RotaryEmbedding(CustomOp):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
+        if self.cos_sin_cache.device != positions.device:
+            self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         cos_sin = self.cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
 

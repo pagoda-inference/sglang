@@ -247,12 +247,25 @@ class TextEncodingStage(PipelineStage):
     ) -> None:
         assert batch.negative_prompt_embeds is not None
 
+        def text_embedding_batch_size(tensor: torch.Tensor) -> int:
+            if tensor.ndim == 2:
+                return 1
+            return int(tensor.shape[0])
+
         # a single negative prompt can be shared across positive prompts
-        target_batch_sizes = [pe.shape[0] for pe in prompt_embeds_list]
+        target_batch_sizes = [text_embedding_batch_size(pe) for pe in prompt_embeds_list]
 
         def align_negative_batch_dim(
-            tensor: torch.Tensor, target_batch: int, name: str
+            tensor: torch.Tensor,
+            target_batch: int,
+            name: str,
+            *,
+            unbatched_2d: bool = False,
         ) -> torch.Tensor:
+            if unbatched_2d and tensor.ndim == 2:
+                if target_batch == 1:
+                    return tensor
+                return tensor.unsqueeze(0).expand(target_batch, *tensor.shape)
             if tensor.shape[0] == target_batch:
                 return tensor
             if tensor.shape[0] == 1 and target_batch > 1:
@@ -274,7 +287,12 @@ class TextEncodingStage(PipelineStage):
 
         for idx, ne in enumerate(neg_embeds_list):
             target_batch = target_batch_sizes[min(idx, len(target_batch_sizes) - 1)]
-            ne = align_negative_batch_dim(ne, target_batch, "negative_prompt_embeds")
+            ne = align_negative_batch_dim(
+                ne,
+                target_batch,
+                "negative_prompt_embeds",
+                unbatched_2d=True,
+            )
             batch.negative_prompt_embeds.append(ne)
 
         for idx, pe in enumerate(neg_pooler_embeds_list):
@@ -630,6 +648,11 @@ class TextEncodingStage(PipelineStage):
                 pooled_embeds_list.append(pooled_output.to(device=target_device))
 
             if return_attention_mask:
+                prompt_mask_shape = (
+                    (1, prompt_embeds.shape[0])
+                    if prompt_embeds.ndim == 2
+                    else prompt_embeds.shape[:2]
+                )
                 if prompt_embeds_mask is not None:
                     mask_to_store = prompt_embeds_mask.to(
                         device=target_device,
@@ -640,12 +663,12 @@ class TextEncodingStage(PipelineStage):
                         ),
                     )
                 elif attention_mask is not None and list(attention_mask.shape) == list(
-                    prompt_embeds.shape[:2]
+                    prompt_mask_shape
                 ):
                     mask_to_store = attention_mask.to(device=target_device)
                 else:
                     mask_to_store = torch.ones(
-                        prompt_embeds.shape[:2],
+                        prompt_mask_shape,
                         device=target_device,
                         dtype=(
                             attention_mask.dtype

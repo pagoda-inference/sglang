@@ -78,6 +78,15 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 logger = logging.getLogger(__name__)
 
 
+def _ensure_rotary_device(rotary_emb, device: torch.device) -> None:
+    if rotary_emb is None:
+        return
+    for name in ("inv_freq", "original_inv_freq"):
+        tensor = getattr(rotary_emb, name, None)
+        if torch.is_tensor(tensor) and tensor.device != device:
+            setattr(rotary_emb, name, tensor.to(device))
+
+
 class Qwen2_5_VLAttention(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
@@ -451,6 +460,8 @@ class Qwen2_5_VLTextModel(nn.Module):
 
         hidden_states = inputs_embeds
 
+        _ensure_rotary_device(self.rotary_emb, hidden_states.device)
+
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
@@ -771,6 +782,11 @@ class Qwen2_5_VLModel(nn.Module):
 
             return position_ids, mrope_position_deltas
 
+    def _ensure_visual_rotary_device(self, device: torch.device) -> None:
+        _ensure_rotary_device(
+            getattr(getattr(self, "visual", None), "rotary_pos_emb", None), device
+        )
+
     def get_video_features(
         self,
         pixel_values_videos: torch.FloatTensor,
@@ -786,6 +802,7 @@ class Qwen2_5_VLModel(nn.Module):
                 The temporal, height and width of feature shape of each video in LLM.
         """
         pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+        self._ensure_visual_rotary_device(pixel_values_videos.device)
         video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
         split_sizes = (
             video_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
@@ -808,6 +825,7 @@ class Qwen2_5_VLModel(nn.Module):
                 The temporal, height and width of feature shape of each image in LLM.
         """
         pixel_values = pixel_values.type(self.visual.dtype)
+        self._ensure_visual_rotary_device(pixel_values.device)
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
         if not isinstance(image_embeds, torch.Tensor):
             # In transformers v5, the visual encoder returns BaseModelOutputWithPooling.

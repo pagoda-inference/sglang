@@ -284,6 +284,10 @@ class ImageEncodingStage(PipelineStage):
                 ) as text_encoder:
                     assert text_encoder is not None
                     self.text_encoder = text_encoder
+                    encoder_device = next(text_encoder.parameters()).device
+                    image_inputs = image_inputs.to(encoder_device)
+                    if batch.do_classifier_free_guidance:
+                        neg_image_inputs = neg_image_inputs.to(encoder_device)
                     with set_forward_context(current_timestep=0, attn_metadata=None):
                         outputs = self.text_encoder(
                             input_ids=image_inputs.input_ids,
