@@ -632,9 +632,12 @@ def _deepseek_family_overrides(server_args: Any, hf_config: Any) -> dict:
                     assert (
                         server_args.dp_size == 1
                     ), "interleave DSA CP does not support DP attention."
-                assert (
-                    server_args.tp_size <= 8
-                ), "Context parallel only supports single machine (tp_size <= 8). Cross-machine CP has precision issues."
+                from sglang.srt.server_args import validate_cross_machine_context_parallel
+
+                validate_cross_machine_context_parallel(
+                    server_args.tp_size,
+                    context=f"{server_args.get_model_config().hf_config.architectures[0]} DSA prefill CP",
+                )
                 # Note(kpham-sgl): Keep attn_tp_size == 1 under DSA CP.
                 # DSACPLayerCommunicator does not all-reduce attention-TP
                 # partial o_proj outputs before replicated dense FFNs.

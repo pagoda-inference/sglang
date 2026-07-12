@@ -172,9 +172,12 @@ def validate_deepseek_v4_cp(server_args: ServerArgs) -> None:
     assert (
         server_args.dp_size == 1
     ), "For round-robin split mode, dp attention is not supported."
-    assert (
-        server_args.tp_size <= 8
-    ), "Context parallel only supports single machine (tp_size <= 8). Cross-machine CP has precision issues."
+    from sglang.srt.server_args import validate_cross_machine_context_parallel
+
+    validate_cross_machine_context_parallel(
+        server_args.tp_size,
+        context=f"{model_arch} prefill CP",
+    )
     if server_args.moe_a2a_backend not in ("none", "deepep", "megamoe"):
         raise ValueError(
             "DeepSeekV4 CP supports moe_a2a_backend in "
