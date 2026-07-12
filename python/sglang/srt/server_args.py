@@ -344,7 +344,34 @@ NSA_PREFILL_CP_SPLIT_CHOICES = DSA_PREFILL_CP_SPLIT_CHOICES  # deprecated alias
 
 PREFILL_CP_SPLIT_CHOICES = ["in-seq-split"]
 
+CROSS_MACHINE_CP_ERROR = (
+    "Context parallel only supports single machine (tp_size <= 8) by default. "
+    "Cross-machine CP has precision issues. Set SGLANG_ALLOW_CROSS_MACHINE_CP=1 "
+    "to run experimental cross-machine CP."
+)
+
 DEFAULT_LORA_EVICTION_POLICY = "lru"
+
+
+def validate_cross_machine_context_parallel(
+    tp_size: int,
+    *,
+    context: str,
+) -> None:
+    """Gate experimental cross-machine context parallelism behind an env var."""
+    if tp_size <= 8:
+        return
+
+    if not envs.SGLANG_ALLOW_CROSS_MACHINE_CP.get():
+        raise ValueError(CROSS_MACHINE_CP_ERROR)
+
+    logger.warning(
+        "Experimental cross-machine context parallelism is enabled for %s: "
+        "tp_size=%s, SGLANG_ALLOW_CROSS_MACHINE_CP=1. Precision is not guaranteed.",
+        context,
+        tp_size,
+    )
+
 
 DSA_CHOICES = [
     "flashmla_sparse",
