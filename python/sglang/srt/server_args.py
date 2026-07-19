@@ -351,6 +351,7 @@ def validate_cross_machine_context_parallel(
 
 DSA_CHOICES = [
     "flashmla_sparse",
+    "flashmla_sparse_q8",
     "flashmla_kv",
     "flashmla_auto",
     "fa3",
