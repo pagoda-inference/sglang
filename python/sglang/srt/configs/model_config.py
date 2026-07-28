@@ -851,6 +851,27 @@ class ModelConfig:
         self.hf_config.context_len = self.context_len
 
     def _derive_model_shapes(self):
+        logger.warning(
+            "[GLM52_SHAPE_DEBUG] begin arch=%s hf_config(q_lora_rank=%s "
+            "kv_lora_rank=%s qk_nope_head_dim=%s qk_rope_head_dim=%s "
+            "hidden_size=%s head_dim=%s) hf_text_config(q_lora_rank=%s "
+            "kv_lora_rank=%s qk_nope_head_dim=%s qk_rope_head_dim=%s "
+            "hidden_size=%s head_dim=%s)",
+            getattr(self.hf_config, "architectures", None),
+            getattr(self.hf_config, "q_lora_rank", None),
+            getattr(self.hf_config, "kv_lora_rank", None),
+            getattr(self.hf_config, "qk_nope_head_dim", None),
+            getattr(self.hf_config, "qk_rope_head_dim", None),
+            getattr(self.hf_config, "hidden_size", None),
+            getattr(self.hf_config, "head_dim", None),
+            getattr(self.hf_text_config, "q_lora_rank", None),
+            getattr(self.hf_text_config, "kv_lora_rank", None),
+            getattr(self.hf_text_config, "qk_nope_head_dim", None),
+            getattr(self.hf_text_config, "qk_rope_head_dim", None),
+            getattr(self.hf_text_config, "hidden_size", None),
+            getattr(self.hf_text_config, "head_dim", None),
+        )
+
         # Unify the config keys for hf_text_config
         self.head_dim = getattr(self.hf_text_config, "head_dim", None)
         if self.head_dim is None:
@@ -902,6 +923,20 @@ class ModelConfig:
             self.qk_nope_head_dim = self.hf_text_config.qk_nope_head_dim
             self.qk_rope_head_dim = self.hf_text_config.qk_rope_head_dim
             self.v_head_dim = self.hf_text_config.v_head_dim
+            if "GlmMoeDsaForCausalLM" in self.hf_config.architectures or (
+                "GlmMoeDsaForCausalLMNextN" in self.hf_config.architectures
+            ):
+                self.qk_rope_head_dim = 64
+                self.hf_text_config.qk_rope_head_dim = 64
+                self.hf_config.qk_rope_head_dim = 64
+                self.hf_text_config.qk_head_dim = (
+                    self.qk_nope_head_dim + self.qk_rope_head_dim
+                )
+                self.hf_config.qk_head_dim = self.hf_text_config.qk_head_dim
+                logger.warning(
+                    "[GLM52_SHAPE_DEBUG] forcing qk_rope_head_dim to 64 for %s",
+                    self.hf_config.architectures,
+                )
             self.index_head_dim = (
                 get_dsa_index_head_dim(self.hf_text_config)
                 if is_deepseek_dsa(self.hf_text_config)
@@ -1008,6 +1043,30 @@ class ModelConfig:
                 self.use_alibi = self.hf_config.hidden_size != 4096
 
             self.attention_arch = AttentionArch.MHA
+
+        logger.warning(
+            "[GLM52_SHAPE_DEBUG] end arch=%s attention_arch=%s head_dim=%s "
+            "v_head_dim=%s kv_lora_rank=%s qk_nope_head_dim=%s "
+            "qk_rope_head_dim=%s hf_config_q_lora_rank=%s "
+            "expected_fused_qkv_a_out=%s",
+            getattr(self.hf_config, "architectures", None),
+            getattr(self, "attention_arch", None),
+            getattr(self, "head_dim", None),
+            getattr(self, "v_head_dim", None),
+            getattr(self, "kv_lora_rank", None),
+            getattr(self, "qk_nope_head_dim", None),
+            getattr(self, "qk_rope_head_dim", None),
+            getattr(self.hf_config, "q_lora_rank", None),
+            (
+                getattr(self.hf_config, "q_lora_rank", 0)
+                + getattr(self, "kv_lora_rank", 0)
+                + getattr(self, "qk_rope_head_dim", 0)
+                if getattr(self.hf_config, "q_lora_rank", None) is not None
+                and getattr(self, "kv_lora_rank", None) is not None
+                and getattr(self, "qk_rope_head_dim", None) is not None
+                else None
+            ),
+        )
 
         self.num_attention_heads = self.hf_text_config.num_attention_heads
         self.num_key_value_heads = getattr(

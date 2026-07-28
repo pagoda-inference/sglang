@@ -1773,6 +1773,25 @@ class DeepseekV2AttentionMLA(
         if rope_scaling:
             rope_scaling["rope_type"] = "deepseek_yarn"
 
+        if layer_id in (None, 0):
+            logger.warning(
+                "[GLM52_SHAPE_DEBUG] attn_init layer_id=%s hidden_size=%s "
+                "q_lora_rank=%s kv_lora_rank=%s qk_nope_head_dim=%s "
+                "qk_rope_head_dim=%s qk_head_dim=%s expected_fused_out=%s",
+                layer_id,
+                hidden_size,
+                q_lora_rank,
+                kv_lora_rank,
+                qk_nope_head_dim,
+                qk_rope_head_dim,
+                self.qk_head_dim,
+                (
+                    (q_lora_rank or 0) + kv_lora_rank + qk_rope_head_dim
+                    if q_lora_rank is not None
+                    else None
+                ),
+            )
+
         # For tensor parallel attention
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj_with_mqa = ReplicatedLinear(

@@ -398,6 +398,17 @@ class DeepseekV2WeightLoaderMixin:
                                     )
                                 )
                                 param = params_dict[param_name]
+                                logger.warning(
+                                    "[GLM52_SHAPE_DEBUG] fuse_a_proj param=%s "
+                                    "param_shape=%s q_a_shape=%s kv_a_shape=%s "
+                                    "fused_shape=%s cat_dim=%s",
+                                    param_name,
+                                    tuple(param.shape),
+                                    tuple(q_a_proj_weight.shape),
+                                    tuple(kv_a_proj_weight.shape),
+                                    tuple(fused_weight.shape),
+                                    cat_dim,
+                                )
 
                                 weight_loader = getattr(
                                     param, "weight_loader", default_weight_loader
