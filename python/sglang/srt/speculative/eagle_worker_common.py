@@ -442,6 +442,7 @@ def run_eagle_verify(
     device: str,
     metadata_ready_pre_pad: bool,
     finalize_tree_path: bool,
+    grammar_barrier=None,
 ) -> GenerationBatchResult:
     """Shared verify step: target-verify forward, sampling, acceptance bookkeeping.
 
@@ -536,6 +537,8 @@ def run_eagle_verify(
     # Generate vocab mask for constrained decoding
     vocab_mask = None
     if batch.has_grammar:
+        if grammar_barrier is not None:
+            grammar_barrier()
         # Generate the logit mask for structured output.
         vocab_mask = generate_token_bitmask(
             batch.reqs,
