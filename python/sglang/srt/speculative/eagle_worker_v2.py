@@ -6,7 +6,24 @@ from typing import List, Optional
 
 import torch
 
-from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
+try:
+    from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
+except ImportError:
+    def draft_topk1_postprocess(
+        next_token_logits: torch.Tensor,
+        positions: torch.Tensor,
+        draft_tokens: Optional[torch.Tensor] = None,
+        draft_token_column: int = 0,
+    ):
+        """Fallback for trees without the optional fused top-k1 kernel."""
+        topk_index = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        topk_p = torch.ones(
+            (topk_index.shape[0],), dtype=torch.float32, device=topk_index.device
+        )
+        if draft_tokens is not None:
+            draft_tokens[:, draft_token_column].copy_(topk_index.flatten())
+        positions.add_(1)
+        return topk_p, topk_index
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.graph_runner.eagle_draft_extend_npu_graph_runner import (
