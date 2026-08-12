@@ -22,6 +22,12 @@ MM_ITEM_MEMORY_POOL_RECYCLE_INTERVAL = (
 
 SHM_LOCK_FILE = "/tmp/shm_wr_lock.lock"
 
+# Marker used by DP-aware multimodal scheduling to defer reconstruction of a
+# CUDA IPC feature until the consumer rank has selected its local assignment.
+DEFER_CUDA_IPC_FEATURE_RECONSTRUCTION_KEY = (
+    "_sglang_defer_cuda_ipc_feature_reconstruction"
+)
+
 
 # Cache for pool-level IPC handles on the consumer side.
 # Key: the pool CUDA IPC handle tuple. Value: opened UntypedStorage.
