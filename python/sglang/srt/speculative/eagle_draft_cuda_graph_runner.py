@@ -150,6 +150,9 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         self.captured_req_width = resolve_num_tokens_per_req(
             phase="draft_decode", server_args=model_runner.server_args
         )
+        # Compatibility with the base CUDA-graph capture path in this branch;
+        # newer callers use captured_req_width directly.
+        self.num_tokens_per_req = self.captured_req_width
         self.max_bs = max(self.capture_bs)
         self.max_num_token = self.max_bs * self.captured_req_width
 
