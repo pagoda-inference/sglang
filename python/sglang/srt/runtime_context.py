@@ -345,6 +345,10 @@ class DpFlags(_FlagGroupBase):
     migrates them."""
 
     enabled: bool = False
+    # DP gather group selected by elastic-EP admission. These are mutable
+    # runtime state because the group can switch after initialization.
+    use_world_group_for_gather: bool = False
+    joiner_skip_all_gather: bool = False
     # Hybrid-SSM models materialize idle ranks via the MAX_LEN fabricated-row
     # conversion (set when hf_config has hybrid_override_pattern).
     max_len_with_idle: bool = False
