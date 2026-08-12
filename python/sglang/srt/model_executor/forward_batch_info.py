@@ -1182,7 +1182,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         from sglang.srt.batch_overlap.two_batch_overlap import TboForwardBatchPreparer
 
         # Local imports: module-level CP helper imports here are circular (#27014).
-        from sglang.srt.layers.cp.padding import get_cp_padding_align_size
+        from sglang.srt.layers.utils.cp_utils import get_cp_padding_align_size
         from sglang.srt.layers.cp.utils import enable_cp_v2
 
         assert self.global_num_tokens_cpu is not None
