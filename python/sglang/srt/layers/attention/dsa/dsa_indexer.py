@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import torch
 from einops import rearrange
 
-from sglang.jit_kernel.fused_store_index_cache import (
+from sglang.kernels.ops.attention.fused_store_index_cache import (
     can_use_dsa_fused_store,
     fused_store_index_k_cache,
 )
@@ -62,7 +62,7 @@ _is_npu = is_npu()
 _is_xpu = is_xpu()
 
 if not _is_npu:
-    from sglang.jit_kernel.dsa import (
+    from sglang.kernels.ops.attention.dsa import (
         aiter_paged_mqa_logits,
         cutedsl_paged_mqa_logits,
         deepgemm_paged_mqa_logits_native,
@@ -75,7 +75,7 @@ else:
     deepgemm_paged_mqa_logits_split = None
 
 if _is_cuda:
-    from sglang.jit_kernel.dsa import pick_dsl_expand
+    from sglang.kernels.ops.attention.dsa import pick_dsl_expand
 else:
     pick_dsl_expand = None
 
@@ -138,6 +138,19 @@ GRAPH_WEIGHTS_PROJ_LORA_ERROR = (
 )
 
 
+def _make_eager_idle_topk_result(
+    x: torch.Tensor, index_topk: int, return_indices: bool
+) -> Optional[torch.Tensor]:
+    if not return_indices:
+        return None
+    return torch.full(
+        (x.shape[0], index_topk),
+        -1,
+        dtype=torch.int32,
+        device=x.device,
+    )
+
+
 def _is_in_piecewise_or_breakable_cuda_graph() -> bool:
     return is_in_tc_piecewise_cuda_graph() or is_in_breakable_cuda_graph()
 
@@ -171,8 +184,8 @@ def _uses_dsa_attention_backend(forward_batch: ForwardBatch) -> bool:
 
 
 if _is_cuda:
-    from sglang.jit_kernel.dsv4 import fused_q_indexer_rope_first_quant
-    from sglang.jit_kernel.dsv32 import (
+    from sglang.kernels.ops.attention.dsv4 import fused_q_indexer_rope_first_quant
+    from sglang.kernels.ops.quantization.dsv32 import (
         fused_k_indexer_norm_rope,
         fused_k_indexer_norm_rope_store,
     )
@@ -343,7 +356,7 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     elif _is_xpu:
         from sgl_kernel import hadamard_transform
     else:
-        from sglang.jit_kernel.hadamard import hadamard_transform
+        from sglang.kernels.ops.quantization.hadamard import hadamard_transform
 
     hidden_size = x.size(-1)
     assert (
@@ -1733,6 +1746,27 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
+        # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
+        x_meta = x[0] if isinstance(x, tuple) else x
+
+        # A DP-attention idle rank can be physically padded with dummy tokens so
+        # it participates in the eager MLP/EP collectives of active ranks. It has
+        # no real request rows, however, so its DSA page table remains empty.
+        # Calling DeepGEMM paged-MQA with the padded q rows then violates its
+        # block-table batch contract (`_batch_size == batch_size`). CUDA graphs
+        # already capture graph-shaped idle metadata; keep that path unchanged.
+        if (
+            _is_cuda
+            and forward_batch.forward_mode.is_idle()
+            and not get_is_capture_mode()
+        ):
+            topk_result = _make_eager_idle_topk_result(
+                x_meta, self.index_topk, return_indices
+            )
+            topk_result = _broadcast_indexer_topk_from_rank0(topk_result)
+            return maybe_capture_indexer_topk(layer_id, topk_result)
+
         if _is_hip:
             from sglang.kernels.ops.attention.dsa.tilelang_kernel import act_quant
         elif not _is_npu:
@@ -1740,10 +1774,6 @@ class Indexer(MultiPlatformOp):
 
         if TYPE_CHECKING:
             assert isinstance(get_token_to_kv_pool(), DSATokenToKVPool)
-
-        # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
-        # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
-        x_meta = x[0] if isinstance(x, tuple) else x
 
         in_piecewise_or_breakable_cuda_graph = (
             _is_in_piecewise_or_breakable_cuda_graph()
@@ -2342,7 +2372,8 @@ class Indexer(MultiPlatformOp):
                 sparse_count=self.index_topk,
                 sparse_mode=3,
             )
-            return topk_indices[0]
+            # Keep DSA top-k as [T, K]; NPU attention expands it when needed.
+            return topk_indices[0].squeeze(1)
 
     def do_npu_cp_balance_indexer(
         self,
