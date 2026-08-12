@@ -1666,9 +1666,12 @@ def _clamp_position_native(seq_lens):
 
 
 if is_cuda() or is_hip():
-    from sglang.kernels.ops.attention.clamp_position import clamp_position_cuda
-
-    clamp_position = clamp_position_cuda
+    try:
+        from sglang.kernels.ops.attention.clamp_position import clamp_position_cuda
+    except ImportError:
+        clamp_position = _clamp_position_native
+    else:
+        clamp_position = clamp_position_cuda
 else:
     clamp_position = _clamp_position_native
 
