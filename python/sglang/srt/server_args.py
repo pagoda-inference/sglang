@@ -931,6 +931,9 @@ class ServerArgs:
             aliases=["--data-parallel-size"],
         ),
     ] = 1
+    # Distributed weight data parallelism size. Kept at one unless DWDP is
+    # explicitly enabled; scheduler DP synchronization reads this value.
+    dwdp_size: int = 1
     load_balance_method: A[
         str,
         Arg(
