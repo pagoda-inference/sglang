@@ -129,7 +129,7 @@ if _is_hip:
             "aiter is AMD specific kernel library. Please make sure aiter is installed on your AMD device."
         )
 else:
-    from sglang.kernels.ops.attention.flash_attention import (
+    from sglang.jit_kernel.flash_attention import (
         flash_attn_varlen_func,
         flash_attn_with_kvcache,
     )
