@@ -2319,6 +2319,13 @@ class DeepseekSparseAttnBackend(
                 layer=layer,
                 metadata=metadata,
                 page_table_1=page_table_1,
+                flashmla_metadata=(
+                    metadata.flashmla_metadata.slice(
+                        slice(0, real_batch_size + 1)
+                    )
+                    if metadata.flashmla_metadata is not None
+                    else None
+                ),
             )
         elif self.dsa_decode_impl == "tilelang":
             # Cat-skip (HIP-only): when caller passes q_rope=None on HIP, q_all
@@ -2587,11 +2594,13 @@ class DeepseekSparseAttnBackend(
         layer,
         metadata: DSAMetadata,
         page_table_1,
+        flashmla_metadata: Optional[DSAFlashMLAMetadata] = None,
     ) -> torch.Tensor:
         from sgl_kernel.flash_mla import flash_mla_with_kvcache
 
-        cache_seqlens = metadata.dsa_cache_seqlens_int32
-        assert metadata.flashmla_metadata is not None
+        cache_seqlens = metadata.dsa_cache_seqlens_int32[: q_all.shape[0]]
+        flashmla_metadata = flashmla_metadata or metadata.flashmla_metadata
+        assert flashmla_metadata is not None
 
         # TODO the 2nd dim is seq_len_q, need to be >1 when MTP
         q_all = q_all.view(-1, 1, layer.tp_q_head_num, layer.head_dim)
@@ -2623,8 +2632,8 @@ class DeepseekSparseAttnBackend(
             k_cache=kv_cache,
             cache_seqlens=cache_seqlens,
             head_dim_v=v_head_dim,
-            tile_scheduler_metadata=metadata.flashmla_metadata.flashmla_metadata,
-            num_splits=metadata.flashmla_metadata.num_splits,
+            tile_scheduler_metadata=flashmla_metadata.flashmla_metadata,
+            num_splits=flashmla_metadata.num_splits,
             softmax_scale=sm_scale,
             indices=indices,
             # doc says it is not used, but if pass in None then error
