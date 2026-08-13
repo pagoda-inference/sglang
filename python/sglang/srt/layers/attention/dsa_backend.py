@@ -2258,6 +2258,29 @@ class DeepseekSparseAttnBackend(
         if topk_indices is not None:
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
+        # Eager DP attention may pad draft activations to the largest local
+        # batch while DSA metadata remains planned for real request rows. Run
+        # attention on the real prefix, then restore the physical rows before
+        # the following MLP/EP collectives.
+        physical_batch_size = q_nope.shape[0]
+        real_batch_size = (
+            metadata.page_table_1.shape[0]
+            if not self.use_fused_topk and metadata.page_table_1 is not None
+            else physical_batch_size
+        )
+        assert real_batch_size <= physical_batch_size, (
+            f"DSA metadata batch size ({real_batch_size}) exceeds q batch size "
+            f"({physical_batch_size})"
+        )
+        num_decode_padding_rows = physical_batch_size - real_batch_size
+        if num_decode_padding_rows:
+            q_nope = q_nope[:real_batch_size]
+            q_rope = q_rope[:real_batch_size]
+            if q_all is not None:
+                q_all = q_all[:real_batch_size]
+            if topk_indices is not None:
+                topk_indices = topk_indices[:real_batch_size]
+
         if self.hisparse_coordinator is not None:
             page_table_1 = self.hisparse_coordinator.swap_in_selected_pages(
                 forward_batch.req_pool_indices,
@@ -2277,7 +2300,7 @@ class DeepseekSparseAttnBackend(
         if self.dsa_decode_impl == "flashmla_sparse":
             if q_rope is not None:
                 q_all = concat_mla_absorb_q_general(q_nope, q_rope)
-            return self._forward_flashmla_sparse(
+            out = self._forward_flashmla_sparse(
                 q_all=q_all,
                 kv_cache=kv_cache,
                 page_table_1=page_table_1,
@@ -2287,7 +2310,7 @@ class DeepseekSparseAttnBackend(
         elif self.dsa_decode_impl == "flashmla_kv":
             if q_rope is not None:
                 q_all = concat_mla_absorb_q_general(q_nope, q_rope)
-            return self._forward_flashmla_kv(
+            out = self._forward_flashmla_kv(
                 q_all=q_all,
                 kv_cache=kv_cache,
                 sm_scale=layer.scaling,
@@ -2304,7 +2327,7 @@ class DeepseekSparseAttnBackend(
             # CUDA / MUSA paths byte-identical to pre-patch by always re-cat.
             if q_all is None or not _is_hip:
                 q_all = concat_mla_absorb_q_general(q_nope, q_rope)
-            return self._forward_tilelang(
+            out = self._forward_tilelang(
                 q_all=q_all,
                 kv_cache=kv_cache,
                 page_table_1=page_table_1,
@@ -2312,7 +2335,7 @@ class DeepseekSparseAttnBackend(
                 v_head_dim=layer.v_head_dim,
             )
         elif self.dsa_decode_impl == "fa3":
-            return self._forward_fa3(
+            out = self._forward_fa3(
                 q_rope=q_rope,
                 kv_cache=kv_cache,
                 v_head_dim=layer.v_head_dim,
@@ -2329,7 +2352,7 @@ class DeepseekSparseAttnBackend(
         elif self.dsa_decode_impl == "aiter":
             if q_all is None or not _is_hip:
                 q_all = torch.cat([q_nope, q_rope], dim=-1)
-            return self._forward_aiter(
+            out = self._forward_aiter(
                 q_all=q_all,
                 kv_cache=kv_cache,
                 page_table_1=page_table_1,
@@ -2340,6 +2363,8 @@ class DeepseekSparseAttnBackend(
 
         else:
             assert False, f"Unsupported {self.dsa_decode_impl = }"
+
+        return _restore_trtllm_decode_dp_padding(out, num_decode_padding_rows)
 
     def _forward_fa3(
         self,
