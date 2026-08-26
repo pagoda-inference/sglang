@@ -130,7 +130,30 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         else:
             num_layers = kvc.layer_info.num_effective_layers
 
+        self.use_hisparse_memory_config = False
+        self._main_kv_size = 0
+        self._indexer_kv_size = 0
         self._cell_size = self._compute_cell_size(kvc, num_layers)
+        self.use_hisparse_memory_config = (
+            kvc.server_args.enable_hisparse
+            and kvc.use_mla_backend
+            and self._indexer_kv_size > 0
+            and kvc.server_args.disaggregation_mode == "decode"
+        )
+        if self.use_hisparse_memory_config:
+            from sglang.srt.mem_cache.sparsity import parse_hisparse_config
+
+            hisparse_config = parse_hisparse_config(kvc.server_args)
+            self._hisparse_device_buffer_size = hisparse_config.device_buffer_size
+            self._hisparse_host_to_device_ratio = hisparse_config.host_to_device_ratio
+            max_running_requests = kvc.server_args.max_running_requests
+            if max_running_requests is None:
+                raise RuntimeError(
+                    "HiSparse memory config requires --max-running-requests."
+                )
+            self._hisparse_max_running_requests = max(
+                max_running_requests // kvc.ps.attn_dp_size, 1
+            )
 
         # EAGLE/STANDALONE: scale cell_size to account for draft model KV cache.
         # Assumes draft and target share the same per-layer KV size (head_dim,
@@ -204,6 +227,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
 
             # Add indexer KV cache overhead for DSA models (DeepSeek V3.2)
             if is_deepseek_dsa(model_config.hf_config):
+                self._main_kv_size = cell_size
                 index_head_dim = get_dsa_index_head_dim(model_config.hf_config)
                 indexer_size_per_token = (
                     index_head_dim
@@ -212,9 +236,10 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 element_size = torch._utils._element_size(
                     DSATokenToKVPool.index_k_with_scale_buffer_dtype
                 )
-                cell_size += (
+                self._indexer_kv_size = (
                     indexer_size_per_token * effective_num_layers * element_size
                 )
+                cell_size += self._indexer_kv_size
         elif is_minimax_sparse(model_config.hf_config):
             # Mirrors MiniMaxSparseKVPool: main pool (K+V all layers) + indexer pool
             # (sparse-only, single-head; kv layers store K+V, k-only layers store K).
@@ -279,6 +304,37 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
     def calculate_pool_sizes(
         self, available_bytes: int, page_size: int
     ) -> MemoryPoolConfig:
+        if self.use_hisparse_memory_config:
+            host_to_device_ratio = self._hisparse_host_to_device_ratio
+            hot_tokens = (
+                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+            )
+            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            remaining_gpu_bytes = available_bytes - hot_tokens * self._main_kv_size
+            if remaining_gpu_bytes <= 0:
+                raise RuntimeError(
+                    "HiSparse GPU memory check failed: "
+                    f"hot_tokens={hot_tokens}, "
+                    f"main_kv_size={self._main_kv_size}, "
+                    f"available_bytes={available_bytes}"
+                )
+
+            gpu_limited_tokens = remaining_gpu_bytes // (
+                self._indexer_kv_size * host_to_device_ratio
+            )
+            cpu_limited_tokens = (available_bytes * host_to_device_ratio) // (
+                self._main_kv_size * host_to_device_ratio
+            )
+            max_total_num_tokens = min(gpu_limited_tokens, cpu_limited_tokens)
+            max_total_num_tokens = max_total_num_tokens // page_size * page_size
+            if max_total_num_tokens < hot_tokens:
+                raise RuntimeError(
+                    "HiSparse memory config cannot fit the required hot GPU buffer: "
+                    f"max_total_num_tokens={max_total_num_tokens}, "
+                    f"hot_tokens={hot_tokens}"
+                )
+            return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
+
         max_total_num_tokens = available_bytes // self._cell_size
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
         return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)

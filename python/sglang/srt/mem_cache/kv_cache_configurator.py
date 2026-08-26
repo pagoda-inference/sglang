@@ -173,6 +173,7 @@ class KVCacheConfigurator:
     memory_pool_config: Optional[MemoryPoolConfig]
     mambaish_config: Optional[Any] = field(init=False)
     hybrid_gdn_config: Optional[Any] = field(init=False)
+    use_hisparse_memory_config: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.mambaish_config = mambaish_config(self.model_config)
@@ -1040,9 +1041,9 @@ class KVCacheConfigurator:
             PoolCls = HiSparseDSATokenToKVPool
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
-            pool_kwargs["host_to_device_ratio"] = parse_hisparse_config(
-                self.server_args
-            ).host_to_device_ratio
+            hisparse_config = parse_hisparse_config(self.server_args)
+            pool_kwargs["host_to_device_ratio"] = hisparse_config.host_to_device_ratio
+            pool_kwargs["use_hisparse_memory_config"] = self.use_hisparse_memory_config
         elif dsa_cp_layer_shard_rank is not None:
             # DSA cache layer split: shard KV/indexer layers across CP ranks.
             from sglang.srt.mem_cache.dsa_cache_layer_split import (
@@ -1346,6 +1347,9 @@ class KVCacheConfigurator:
                             kvcache=token_to_kv_pool,
                             need_sort=need_sort,
                             host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
+                            use_hisparse_memory_config=(
+                                self.use_hisparse_memory_config
+                            ),
                         )
                     elif (
                         self.server_args.page_size == 1
@@ -1558,6 +1562,9 @@ class KVCacheConfigurator:
         )
 
         configurator = create_memory_pool_configurator(self)
+        self.use_hisparse_memory_config = getattr(
+            configurator, "use_hisparse_memory_config", False
+        )
         config = configurator.calculate_pool_sizes(
             budget_bytes, self.server_args.page_size
         )
