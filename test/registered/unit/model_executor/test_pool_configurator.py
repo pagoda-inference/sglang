@@ -309,7 +309,7 @@ class TestDSAModelConfigurator(unittest.TestCase):
     AVAILABLE_GPU_GB = (32, 64, 96)
     DEVICE_BUFFER_SIZES = (4096, 6144, 8192)
     BATCH_SIZES = (32, 64, 96)
-    HOST_TO_DEVICE_RATIOS = (2, 5, 8)
+    HOST_TO_DEVICE_RATIOS = (1, 2, 5, 8)
 
     @staticmethod
     def _make_dsa_hf_config(index_head_dim=INDEX_HEAD_DIM):
@@ -375,12 +375,9 @@ class TestDSAModelConfigurator(unittest.TestCase):
     def _expected_hisparse_pool_size(self, buffer_size, batch_size):
         return self._align_up(buffer_size * batch_size, self.PAGE_SIZE)
 
-    def _actual_hisparse_gpu_memory(
-        self, config, buffer_size, batch_size, host_to_device_ratio
-    ):
-        hot_tokens = self._expected_hisparse_pool_size(buffer_size, batch_size)
+    def _actual_hisparse_gpu_memory(self, config, host_to_device_ratio):
         return (
-            hot_tokens * self._main_kv_cell_size()
+            config.max_total_num_tokens * self._main_kv_cell_size()
             + config.max_total_num_tokens
             * host_to_device_ratio
             * self._index_k_cell_size()
@@ -420,8 +417,6 @@ class TestDSAModelConfigurator(unittest.TestCase):
                         if (
                             self._actual_hisparse_gpu_memory(
                                 minimal_config,
-                                buffer_size,
-                                batch_size,
                                 host_to_device_ratio,
                             )
                             > available_gpu
@@ -451,8 +446,6 @@ class TestDSAModelConfigurator(unittest.TestCase):
                             self.assertLessEqual(
                                 self._actual_hisparse_gpu_memory(
                                     config,
-                                    buffer_size,
-                                    batch_size,
                                     host_to_device_ratio,
                                 ),
                                 available_gpu,
