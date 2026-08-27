@@ -50,6 +50,7 @@ class MemoryPoolConfig:
     max_running_requests: Optional[int] = None
     full_max_total_num_tokens: Optional[int] = None
     swa_max_total_num_tokens: Optional[int] = None
+    hisparse_device_num_tokens: Optional[int] = None
 
     # DSV4 compressed-attention pool sizes (target only; draft workers leave at 0).
     c4_max_total_num_tokens: int = 0
@@ -310,24 +311,35 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 self._hisparse_device_buffer_size * self._hisparse_max_running_requests
             )
             hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
-            gpu_bytes_per_device_token = (
-                self._main_kv_size + self._indexer_kv_size * host_to_device_ratio
-            )
-            required_hot_gpu_bytes = hot_tokens * gpu_bytes_per_device_token
-            if required_hot_gpu_bytes > available_bytes:
+            remaining_gpu_bytes = available_bytes - hot_tokens * self._main_kv_size
+            if remaining_gpu_bytes <= 0:
                 raise RuntimeError(
                     "HiSparse GPU memory cannot fit the required hot buffer: "
                     f"hot_tokens={hot_tokens}, "
                     f"main_kv_size={self._main_kv_size}, "
-                    f"indexer_kv_size={self._indexer_kv_size}, "
-                    f"host_to_device_ratio={host_to_device_ratio}, "
-                    f"required_bytes={required_hot_gpu_bytes}, "
                     f"available_bytes={available_bytes}"
                 )
 
-            max_total_num_tokens = available_bytes // gpu_bytes_per_device_token
+            gpu_limited_tokens = remaining_gpu_bytes // self._indexer_kv_size
+            cpu_limited_tokens = (
+                available_bytes * host_to_device_ratio
+            ) // self._main_kv_size
+            max_total_num_tokens = min(gpu_limited_tokens, cpu_limited_tokens)
             max_total_num_tokens = max_total_num_tokens // page_size * page_size
-            return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
+            min_logical_tokens = hot_tokens * host_to_device_ratio
+            if max_total_num_tokens < min_logical_tokens:
+                raise RuntimeError(
+                    "HiSparse memory config cannot fit the requested device-to-host "
+                    "capacity ratio: "
+                    f"max_total_num_tokens={max_total_num_tokens}, "
+                    f"min_logical_tokens={min_logical_tokens}, "
+                    f"hot_tokens={hot_tokens}, "
+                    f"host_to_device_ratio={host_to_device_ratio}"
+                )
+            return MemoryPoolConfig(
+                max_total_num_tokens=max_total_num_tokens,
+                hisparse_device_num_tokens=hot_tokens,
+            )
 
         max_total_num_tokens = available_bytes // self._cell_size
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
@@ -337,6 +349,23 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         self, max_total_num_tokens: int, page_size: int
     ) -> MemoryPoolConfig:
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
+        if self.use_hisparse_memory_config:
+            hot_tokens = (
+                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+            )
+            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            min_logical_tokens = hot_tokens * self._hisparse_host_to_device_ratio
+            if max_total_num_tokens < min_logical_tokens:
+                raise RuntimeError(
+                    "The constrained HiSparse token capacity is smaller than the "
+                    "required device-to-host capacity: "
+                    f"max_total_num_tokens={max_total_num_tokens}, "
+                    f"min_logical_tokens={min_logical_tokens}"
+                )
+            return MemoryPoolConfig(
+                max_total_num_tokens=max_total_num_tokens,
+                hisparse_device_num_tokens=hot_tokens,
+            )
         return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
 
 

@@ -326,6 +326,7 @@ class TestDSAModelConfigurator(unittest.TestCase):
         max_running_requests=None,
         device_buffer_size=None,
         host_to_device_ratio=None,
+        attn_dp_size=1,
     ):
         hisparse_config = None
         if enable_hisparse:
@@ -337,7 +338,7 @@ class TestDSAModelConfigurator(unittest.TestCase):
                 }
             )
 
-        return _make_model_runner(
+        mr = _make_model_runner(
             num_layers=self.NUM_LAYERS,
             use_mla_backend=True,
             page_size=self.PAGE_SIZE,
@@ -351,6 +352,8 @@ class TestDSAModelConfigurator(unittest.TestCase):
             kv_cache_dtype=torch.bfloat16,
             disaggregation_mode="decode" if enable_hisparse else "null",
         )
+        mr.ps = SimpleNamespace(attn_dp_size=attn_dp_size)
+        return mr
 
     def _calculate_config(self, mr, available_bytes):
         with mock_cpu_env():
@@ -375,20 +378,14 @@ class TestDSAModelConfigurator(unittest.TestCase):
     def _expected_hisparse_pool_size(self, buffer_size, batch_size):
         return self._align_up(buffer_size * batch_size, self.PAGE_SIZE)
 
-    def _actual_hisparse_gpu_memory(self, config, host_to_device_ratio):
+    def _actual_hisparse_gpu_memory(self, config):
         return (
-            config.max_total_num_tokens * self._main_kv_cell_size()
-            + config.max_total_num_tokens
-            * host_to_device_ratio
-            * self._index_k_cell_size()
+            config.hisparse_device_num_tokens * self._main_kv_cell_size()
+            + config.max_total_num_tokens * self._index_k_cell_size()
         )
 
     def _actual_hisparse_cpu_memory(self, config, host_to_device_ratio):
-        return (
-            config.max_total_num_tokens
-            * host_to_device_ratio
-            * self._main_kv_cell_size()
-        )
+        return config.max_total_num_tokens * self._main_kv_cell_size()
 
     def test_non_hisparse_full_gpu_pool_fits_available_memory(self):
         mr = self._make_dsa_runner()
@@ -412,12 +409,12 @@ class TestDSAModelConfigurator(unittest.TestCase):
                     for host_to_device_ratio in self.HOST_TO_DEVICE_RATIOS:
                         available_cpu = available_gpu * host_to_device_ratio
                         minimal_config = SimpleNamespace(
-                            max_total_num_tokens=hot_tokens
+                            max_total_num_tokens=hot_tokens * host_to_device_ratio,
+                            hisparse_device_num_tokens=hot_tokens,
                         )
                         if (
                             self._actual_hisparse_gpu_memory(
                                 minimal_config,
-                                host_to_device_ratio,
                             )
                             > available_gpu
                             or self._actual_hisparse_cpu_memory(
@@ -440,13 +437,16 @@ class TestDSAModelConfigurator(unittest.TestCase):
                                 host_to_device_ratio=host_to_device_ratio,
                             )
                             _, config = self._calculate_config(mr, available_gpu)
+                            self.assertEqual(
+                                config.hisparse_device_num_tokens, hot_tokens
+                            )
                             self.assertGreaterEqual(
-                                config.max_total_num_tokens, hot_tokens
+                                config.max_total_num_tokens,
+                                hot_tokens * host_to_device_ratio,
                             )
                             self.assertLessEqual(
                                 self._actual_hisparse_gpu_memory(
                                     config,
-                                    host_to_device_ratio,
                                 ),
                                 available_gpu,
                             )
@@ -459,6 +459,56 @@ class TestDSAModelConfigurator(unittest.TestCase):
                             self.assertEqual(
                                 config.max_total_num_tokens % self.PAGE_SIZE, 0
                             )
+
+    def test_host_ratio_increases_logical_capacity_until_gpu_limited(self):
+        available_gpu = 32 * 1024**3
+        capacities = []
+        for host_to_device_ratio in self.HOST_TO_DEVICE_RATIOS:
+            mr = self._make_dsa_runner(
+                enable_hisparse=True,
+                max_running_requests=32,
+                device_buffer_size=4096,
+                host_to_device_ratio=host_to_device_ratio,
+            )
+            _, config = self._calculate_config(mr, available_gpu)
+            capacities.append(config.max_total_num_tokens)
+
+        self.assertLess(capacities[0], capacities[1])
+        self.assertLess(capacities[1], capacities[2])
+        self.assertLessEqual(capacities[2], capacities[3])
+
+    def test_larger_device_buffer_reduces_logical_capacity(self):
+        available_gpu = 32 * 1024**3
+        capacities = []
+        for device_buffer_size in (4096, 8192):
+            mr = self._make_dsa_runner(
+                enable_hisparse=True,
+                max_running_requests=32,
+                device_buffer_size=device_buffer_size,
+                host_to_device_ratio=8,
+            )
+            _, config = self._calculate_config(mr, available_gpu)
+            capacities.append(config.max_total_num_tokens)
+
+        self.assertGreater(capacities[0], capacities[1])
+
+    def test_dp32_uses_one_hot_buffer_per_worker(self):
+        available_gpu = 32 * 1024**3
+        capacities = []
+        for host_to_device_ratio in (1, 2, 5):
+            mr = self._make_dsa_runner(
+                enable_hisparse=True,
+                max_running_requests=32,
+                device_buffer_size=2048,
+                host_to_device_ratio=host_to_device_ratio,
+                attn_dp_size=32,
+            )
+            _, config = self._calculate_config(mr, available_gpu)
+            self.assertEqual(config.hisparse_device_num_tokens, 2048)
+            capacities.append(config.max_total_num_tokens)
+
+        self.assertLess(capacities[0], capacities[1])
+        self.assertLess(capacities[1], capacities[2])
 
 
 class TestHybridSWAConfigurator(unittest.TestCase):

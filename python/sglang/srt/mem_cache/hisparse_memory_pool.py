@@ -42,10 +42,12 @@ class HiSparseDSATokenToKVPool(DSATokenToKVPool):
         end_layer: Optional[int] = None,
         host_to_device_ratio: int = 2,
         use_hisparse_memory_config: bool = True,
+        logical_size: Optional[int] = None,
     ):
-        logical_size = (
-            size * host_to_device_ratio if use_hisparse_memory_config else size
-        )
+        if logical_size is None:
+            logical_size = (
+                size * host_to_device_ratio if use_hisparse_memory_config else size
+            )
         super().__init__(
             size=size,
             page_size=page_size,
