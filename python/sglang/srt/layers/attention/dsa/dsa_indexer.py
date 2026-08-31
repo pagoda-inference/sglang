@@ -403,13 +403,17 @@ class Indexer(MultiPlatformOp):
         self.index_topk = index_topk
         self.q_lora_rank = q_lora_rank
         self.layer_id = layer_id
+        self.dsa_enable_prefill_cp = is_dsa_enable_prefill_cp()
         self.use_dsa_indexer_fusion = (
             _is_cuda
             and not envs.SGLANG_DISABLE_DSA_INDEXER_FUSION.get()
             and not is_neox_style
+            # Prefill CP must gather the projected index keys before storing
+            # them. The fused representation is only valid with the fused
+            # Q/K preparation and direct cache-store path.
+            and not self.dsa_enable_prefill_cp
         )
         self.alt_stream = alt_stream
-        self.dsa_enable_prefill_cp = is_dsa_enable_prefill_cp()
         if self.dsa_enable_prefill_cp:
             self.cp_size = get_parallel().attn_cp_size
             self.cp_rank = get_parallel().attn_cp_rank
