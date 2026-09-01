@@ -95,9 +95,12 @@ class HiSparseCoordinator:
             self.mem_pool_device: HiSparseDSATokenToKVPool = (
                 self.token_to_kv_pool_allocator.get_kvcache()
             )
+            resolved_host_to_device_ratio = (
+                self.token_to_kv_pool_allocator.size_full / self.mem_pool_device.size
+            )
             self.mem_pool_host = MLATokenToKVPoolHost(
                 device_pool=self.mem_pool_device,
-                host_to_device_ratio=host_to_device_ratio,
+                host_to_device_ratio=resolved_host_to_device_ratio,
                 host_size=0,
                 page_size=self.mem_pool_device.page_size,
                 layout="layer_first",

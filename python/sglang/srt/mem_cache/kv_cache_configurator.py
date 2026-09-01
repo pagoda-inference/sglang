@@ -139,6 +139,7 @@ class _PoolSizes(msgspec.Struct, frozen=True, kw_only=True):
     max_running_requests: int
     full_max_total_num_tokens: Optional[int]
     swa_max_total_num_tokens: Optional[int]
+    hisparse_device_num_tokens: Optional[int]
     c4_max_total_num_tokens: int
     c128_max_total_num_tokens: int
     c4_state_pool_size: int
@@ -173,6 +174,7 @@ class KVCacheConfigurator:
     memory_pool_config: Optional[MemoryPoolConfig]
     mambaish_config: Optional[Any] = field(init=False)
     hybrid_gdn_config: Optional[Any] = field(init=False)
+    use_hisparse_memory_config: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.mambaish_config = mambaish_config(self.model_config)
@@ -248,6 +250,7 @@ class KVCacheConfigurator:
             max_running_requests=max_running_requests,
             full_max_total_num_tokens=full_max_total_num_tokens,
             swa_max_total_num_tokens=swa_max_total_num_tokens,
+            hisparse_device_num_tokens=config.hisparse_device_num_tokens,
             c4_max_total_num_tokens=c4_max_total_num_tokens,
             c128_max_total_num_tokens=c128_max_total_num_tokens,
             c4_state_pool_size=c4_state_pool_size,
@@ -757,6 +760,7 @@ class KVCacheConfigurator:
         elif self.use_mla_backend and is_dsa_model:
             token_to_kv_pool = self._build_dsa_kv_pool(
                 max_total_num_tokens=sizes.max_total_num_tokens,
+                hisparse_device_num_tokens=sizes.hisparse_device_num_tokens,
             )
         elif self.use_mla_backend and not self.mambaish_config:
             assert not is_dsa_model
@@ -1028,7 +1032,12 @@ class KVCacheConfigurator:
         )
         return token_to_kv_pool
 
-    def _build_dsa_kv_pool(self, *, max_total_num_tokens: int) -> KVCache:
+    def _build_dsa_kv_pool(
+        self,
+        *,
+        max_total_num_tokens: int,
+        hisparse_device_num_tokens: Optional[int],
+    ) -> KVCache:
         from sglang.srt.layers.cp.utils import get_glm_dsa_cp_layer_shard_info
 
         (
@@ -1036,13 +1045,18 @@ class KVCacheConfigurator:
             dsa_cp_layer_shard_size,
         ) = get_glm_dsa_cp_layer_shard_info(self)
         pool_kwargs = {}
+        pool_num_tokens = max_total_num_tokens
         if self.server_args.enable_hisparse:
             PoolCls = HiSparseDSATokenToKVPool
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
-            pool_kwargs["host_to_device_ratio"] = parse_hisparse_config(
-                self.server_args
-            ).host_to_device_ratio
+            hisparse_config = parse_hisparse_config(self.server_args)
+            pool_kwargs["host_to_device_ratio"] = hisparse_config.host_to_device_ratio
+            pool_kwargs["use_hisparse_memory_config"] = self.use_hisparse_memory_config
+            if self.use_hisparse_memory_config:
+                assert hisparse_device_num_tokens is not None
+                pool_num_tokens = hisparse_device_num_tokens
+                pool_kwargs["logical_size"] = max_total_num_tokens
         elif dsa_cp_layer_shard_rank is not None:
             # DSA cache layer split: shard KV/indexer layers across CP ranks.
             from sglang.srt.mem_cache.dsa_cache_layer_split import (
@@ -1055,7 +1069,7 @@ class KVCacheConfigurator:
         else:
             PoolCls = DSATokenToKVPool
         token_to_kv_pool = PoolCls(
-            max_total_num_tokens,
+            pool_num_tokens,
             page_size=self.server_args.page_size,
             dtype=self.kv_cache_dtype,
             kv_lora_rank=self.model_config.kv_lora_rank,
@@ -1338,14 +1352,24 @@ class KVCacheConfigurator:
                         )
 
                         hisparse_cfg = parse_hisparse_config(self.server_args)
+                        device_num_tokens = (
+                            sizes.hisparse_device_num_tokens
+                            if self.use_hisparse_memory_config
+                            else sizes.max_total_num_tokens
+                        )
+                        assert device_num_tokens is not None
                         token_to_kv_pool_allocator = HiSparseTokenToKVPoolAllocator(
-                            sizes.max_total_num_tokens,
+                            device_num_tokens,
                             page_size=self.server_args.page_size,
                             dtype=self.kv_cache_dtype,
                             device=self.device,
                             kvcache=token_to_kv_pool,
                             need_sort=need_sort,
                             host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
+                            use_hisparse_memory_config=(
+                                self.use_hisparse_memory_config
+                            ),
+                            logical_size=sizes.max_total_num_tokens,
                         )
                     elif (
                         self.server_args.page_size == 1
@@ -1558,6 +1582,9 @@ class KVCacheConfigurator:
         )
 
         configurator = create_memory_pool_configurator(self)
+        self.use_hisparse_memory_config = getattr(
+            configurator, "use_hisparse_memory_config", False
+        )
         config = configurator.calculate_pool_sizes(
             budget_bytes, self.server_args.page_size
         )
