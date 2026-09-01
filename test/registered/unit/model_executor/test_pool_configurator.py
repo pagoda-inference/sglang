@@ -139,6 +139,8 @@ def _make_model_runner(
     sa.enable_dsa_cache_layer_split = False
     sa.enable_hisparse = enable_hisparse
     sa.hisparse_config = hisparse_config
+    sa.dsa_prefill_backend = "flashmla_sparse"
+    sa.dsa_decode_backend = "flashmla_sparse"
     mr.server_args = sa
 
     spec = MagicMock()
@@ -327,6 +329,7 @@ class TestDSAModelConfigurator(unittest.TestCase):
         device_buffer_size=None,
         host_to_device_ratio=None,
         attn_dp_size=1,
+        kv_cache_dtype=torch.bfloat16,
     ):
         hisparse_config = None
         if enable_hisparse:
@@ -349,7 +352,7 @@ class TestDSAModelConfigurator(unittest.TestCase):
             enable_hisparse=enable_hisparse,
             max_running_requests=max_running_requests,
             hisparse_config=hisparse_config,
-            kv_cache_dtype=torch.bfloat16,
+            kv_cache_dtype=kv_cache_dtype,
             disaggregation_mode="decode" if enable_hisparse else "null",
         )
         mr.ps = SimpleNamespace(attn_dp_size=attn_dp_size)
@@ -395,6 +398,21 @@ class TestDSAModelConfigurator(unittest.TestCase):
                 _, config = self._calculate_config(mr, available_gpu)
                 self.assertLessEqual(_actual_memory_used(mr, config), available_gpu)
                 self.assertEqual(config.max_total_num_tokens % self.PAGE_SIZE, 0)
+
+    def test_fp8_main_kv_size_uses_actual_mla_layout(self):
+        mr = self._make_dsa_runner(kv_cache_dtype=torch.float8_e4m3fn)
+        with mock_cpu_env(kv_size=1):
+            from sglang.srt.model_executor.pool_configurator import (
+                create_memory_pool_configurator,
+            )
+
+            configurator = create_memory_pool_configurator(mr)
+
+        expected_mla_dim = 512 + 512 // 128 * 4 + 64 * 2
+        self.assertEqual(
+            configurator._main_kv_size,
+            expected_mla_dim * self.NUM_LAYERS,
+        )
 
     def test_hisparse_gpu_and_cpu_pool_fit_memory_budget(self):
         for available_gpu_gb in self.AVAILABLE_GPU_GB:

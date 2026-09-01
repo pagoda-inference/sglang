@@ -209,8 +209,16 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         tp_size = get_parallel().attn_tp_size
 
         if kvc.use_mla_backend:
+            from sglang.srt.mem_cache.kv_cache_configurator import (
+                calculate_mla_kv_cache_dim,
+            )
+
             cell_size = (
-                (model_config.kv_lora_rank + model_config.qk_rope_head_dim)
+                calculate_mla_kv_cache_dim(
+                    model_config=model_config,
+                    kv_cache_dtype=kv_cache_dtype,
+                    server_args=kvc.server_args,
+                )
                 * effective_num_layers
                 * kv_size
             )
