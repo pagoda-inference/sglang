@@ -13,8 +13,8 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 
 class TestDisaggregationServerWarmup(unittest.IsolatedAsyncioTestCase):
-    async def test_sends_concurrent_scalar_request_to_each_dp_rank(self):
-        server_args = SimpleNamespace(dp_size=4)
+    async def test_sends_unique_batched_bootstrap_rooms_to_each_dp_rank(self):
+        server_args = SimpleNamespace(dp_size=4, tp_size=2)
         all_started = asyncio.Event()
         calls = []
         sessions = []
@@ -70,12 +70,23 @@ class TestDisaggregationServerWarmup(unittest.IsolatedAsyncioTestCase):
             kwargs["json"]["routed_dp_rank"]: (args, kwargs) for args, kwargs in calls
         }
         self.assertEqual(set(calls_by_rank), set(range(server_args.dp_size)))
+        all_rooms = [
+            room
+            for _, kwargs in calls
+            for room in kwargs["json"]["bootstrap_room"]
+        ]
+        self.assertEqual(len(all_rooms), server_args.dp_size**2)
+        self.assertEqual(len(set(all_rooms)), len(all_rooms))
 
         for dp_rank, (args, kwargs) in calls_by_rank.items():
             self.assertEqual(args, ("http://localhost:30000/generate",))
-            self.assertEqual(kwargs["json"]["input_ids"], [10, 11, 12, 13])
-            self.assertEqual(kwargs["json"]["bootstrap_host"], FAKE_BOOTSTRAP_HOST)
-            self.assertEqual(kwargs["json"]["bootstrap_room"], dp_rank)
+            self.assertEqual(
+                kwargs["json"]["input_ids"], [[10, 11, 12, 13]] * server_args.dp_size
+            )
+            self.assertEqual(
+                kwargs["json"]["bootstrap_host"],
+                [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
+            )
             self.assertFalse(kwargs["ssl"])
 
 

@@ -135,6 +135,8 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         self._main_kv_size = 0
         self._indexer_kv_size = 0
         self._cell_size = self._compute_cell_size(kvc, num_layers)
+        self._target_kv_size = self._cell_size
+        self._draft_kv_size = 0
         self.use_hisparse_memory_config = (
             kvc.server_args.enable_hisparse
             and kvc.use_mla_backend
@@ -191,6 +193,8 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     target_num_layers=int(num_layers),
                     draft_num_layers=int(draft_num_layers),
                 )
+
+        self._draft_kv_size = max(self._cell_size - self._target_kv_size, 0)
 
     def _compute_cell_size(self, kvc: KVCacheConfigurator, num_layers: int) -> int:
         """Compute per-token KV cache cost in bytes. Subclasses can override."""
@@ -328,7 +332,12 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     f"available_bytes={available_bytes}"
                 )
 
-            gpu_limited_tokens = remaining_gpu_bytes // self._indexer_kv_size
+            logical_gpu_bytes_per_token = (
+                self._indexer_kv_size + self._draft_kv_size
+            )
+            gpu_limited_tokens = (
+                remaining_gpu_bytes // logical_gpu_bytes_per_token
+            )
             cpu_limited_tokens = (
                 available_bytes * host_to_device_ratio
             ) // self._main_kv_size

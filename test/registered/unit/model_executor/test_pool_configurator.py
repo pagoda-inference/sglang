@@ -495,6 +495,52 @@ class TestDSAModelConfigurator(unittest.TestCase):
         self.assertLess(capacities[1], capacities[2])
         self.assertLessEqual(capacities[2], capacities[3])
 
+    def test_hisparse_reserves_eagle_draft_kv_on_gpu(self):
+        available_gpu = 32 * 1024**3
+        base_mr = self._make_dsa_runner(
+            enable_hisparse=True,
+            max_running_requests=32,
+            device_buffer_size=4096,
+            host_to_device_ratio=2,
+        )
+        mtp_mr = self._make_dsa_runner(
+            enable_hisparse=True,
+            max_running_requests=32,
+            device_buffer_size=4096,
+            host_to_device_ratio=2,
+        )
+        mtp_mr.spec_algorithm.is_eagle.return_value = True
+        mtp_mr.spec_aux_config.eagle_draft_num_layers = 1
+
+        with mock_cpu_env():
+            from sglang.srt.model_executor.pool_configurator import (
+                create_memory_pool_configurator,
+            )
+
+            base_configurator = create_memory_pool_configurator(base_mr)
+            mtp_configurator = create_memory_pool_configurator(mtp_mr)
+            base_config = base_configurator.calculate_pool_sizes(
+                available_gpu, self.PAGE_SIZE
+            )
+            mtp_config = mtp_configurator.calculate_pool_sizes(
+                available_gpu, self.PAGE_SIZE
+            )
+
+        draft_bytes_per_token = (
+            self._main_kv_cell_size() + self._index_k_cell_size()
+        ) // self.NUM_LAYERS
+        self.assertEqual(mtp_configurator._draft_kv_size, draft_bytes_per_token)
+        self.assertLess(
+            mtp_config.max_total_num_tokens, base_config.max_total_num_tokens
+        )
+        actual_gpu_bytes = (
+            mtp_config.hisparse_device_num_tokens
+            * self._main_kv_cell_size()
+            + mtp_config.max_total_num_tokens
+            * (self._index_k_cell_size() + draft_bytes_per_token)
+        )
+        self.assertLessEqual(actual_gpu_bytes, available_gpu)
+
     def test_larger_device_buffer_reduces_logical_capacity(self):
         available_gpu = 32 * 1024**3
         capacities = []

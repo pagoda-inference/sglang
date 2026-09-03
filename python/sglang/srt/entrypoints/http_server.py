@@ -2038,10 +2038,8 @@ async def _send_disaggregation_warmup_requests(
 
     dp_size = server_args.dp_size
     tp_size = server_args.tp_size
-    bootstrap_rooms = [
-        (i + 1) * (2**63 // (max(dp_size, 1) + 1)) + (i % max(tp_size, 1))
-        for i in range(dp_size)
-    ]
+    total_warmup_requests = dp_size * dp_size
+    room_stride = 2**63 // (total_warmup_requests + 1)
 
     async def send_request(session: aiohttp.ClientSession, dp_rank: int) -> int:
         json_data = {
@@ -2050,7 +2048,11 @@ async def _send_disaggregation_warmup_requests(
             ]
             * dp_size,
             "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * dp_size,
-            "bootstrap_room": bootstrap_rooms,
+            "bootstrap_room": [
+                (dp_rank * dp_size + i + 1) * room_stride
+                + (i % max(tp_size, 1))
+                for i in range(dp_size)
+            ],
             "input_ids": [[10, 11, 12, 13]] * dp_size,
             "routed_dp_rank": dp_rank,
         }
