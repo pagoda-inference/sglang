@@ -73,6 +73,7 @@ else:
 
 _DEEPGEMM_ON_H20 = get_bool_env_var("SGLANG_DEEPGEMM_ON_H20")
 _masked_standard_layout_memory_budget_bytes: Optional[int] = None
+_COPY_TO_GPU_NO_CE_AVAILABLE = True
 
 
 # TODO(kaixih@nvidia): ideally we should merge this logic into
@@ -92,35 +93,27 @@ def _cast_to_e8m0_with_rounding_up(x: torch.Tensor) -> torch.Tensor:
 
 
 def copy_list_to_gpu_no_ce(arr: List[int]):
+    global _COPY_TO_GPU_NO_CE_AVAILABLE
+
+    if not _COPY_TO_GPU_NO_CE_AVAILABLE:
+        return torch.tensor(
+            arr, dtype=torch.int32, pin_memory=True, device="cpu"
+        ).cuda(non_blocking=True)
+
     from sgl_kernel.elementwise import copy_to_gpu_no_ce
 
-    supported_sizes = (32, 64, 72)
-    num_elements = len(arr)
-
-    if num_elements in supported_sizes:
-        tensor_cpu = torch.tensor(arr, dtype=torch.int32, device="cpu")
-        tensor_gpu = torch.empty_like(tensor_cpu, device="cuda")
+    tensor_cpu = torch.tensor(arr, dtype=torch.int32, device="cpu")
+    tensor_gpu = torch.empty_like(tensor_cpu, device="cuda")
+    try:
         copy_to_gpu_no_ce(tensor_cpu, tensor_gpu)
         return tensor_gpu
-
-    chunks = []
-    start = 0
-    while start < num_elements:
-        remaining = num_elements - start
-        padded_size = next(
-            (size for size in supported_sizes if size >= remaining),
-            supported_sizes[-1],
-        )
-        values = arr[start : start + padded_size]
-        values += [0] * (padded_size - len(values))
-        tensor_cpu = torch.tensor(values, dtype=torch.int32, device="cpu")
-        tensor_gpu = torch.empty_like(tensor_cpu, device="cuda")
-        copy_to_gpu_no_ce(tensor_cpu, tensor_gpu)
-        chunks.append(tensor_gpu)
-        start += padded_size
-
-    tensor_gpu = chunks[0] if len(chunks) == 1 else torch.cat(chunks)
-    return tensor_gpu[:num_elements]
+    except RuntimeError as exc:
+        if "unexpected N" not in str(exc):
+            raise
+        _COPY_TO_GPU_NO_CE_AVAILABLE = False
+        return torch.tensor(
+            arr, dtype=torch.int32, pin_memory=True, device="cpu"
+        ).cuda(non_blocking=True)
 
 
 def set_masked_standard_layout_memory_budget(
