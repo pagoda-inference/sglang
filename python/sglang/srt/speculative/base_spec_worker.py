@@ -329,6 +329,10 @@ class BaseSpecWorker(ABC):
         """
         pass
 
+    def requires_dp_attention_eager_forward(self, batch) -> bool:
+        """Whether this rank needs the current DP-attention step eagerly."""
+        return False
+
     def activate_step_by_batch(self, batch_size: int) -> None:
         """Activate the optimal adaptive step for the current batch size.
 
