@@ -2186,6 +2186,8 @@ class SchedulerDisaggregationDecodeMixin:
                 continue
             self.process_decode_queue()
 
+            self._apply_war_barrier()
+
             # Get the next batch to run
             plan = self.get_next_disagg_decode_batch_to_run(
                 running_batch=self.running_batch
@@ -2207,7 +2209,6 @@ class SchedulerDisaggregationDecodeMixin:
             # Launch the current batch
             if batch:
                 batch_result = self.run_batch(batch)
-                self._apply_war_barrier()
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None
