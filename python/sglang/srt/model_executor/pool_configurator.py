@@ -152,7 +152,6 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         self._main_kv_size = 0
         self._indexer_kv_size = 0
         self._indexer_kv_base_size = 0
-        self._hisparse_indexer_ratio = 1
         # Determine effective number of layers for KV cache
         if mambaish := mambaish_config(kvc.model_config):
             effective_layer_ids = [
@@ -310,9 +309,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     num_layers=num_layers,
                 )
                 self._indexer_kv_size = cell_size - self._main_kv_size
-                self._indexer_kv_base_size = (
-                    self._indexer_kv_size // self._hisparse_indexer_ratio
-                )
+                self._indexer_kv_base_size = self._indexer_kv_size
         elif is_minimax_sparse(model_config.hf_config):
             # Mirrors MiniMaxSparseKVPool: main pool (K+V all layers) + indexer pool
             # (sparse-only, single-head; kv layers store K+V, k-only layers store K).
@@ -395,17 +392,6 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         element_size = torch._utils._element_size(
             DSATokenToKVPool.index_k_with_scale_buffer_dtype
         )
-        memory_config = get_memory()
-        indexer_ratio = 1
-        if memory_config.enable_hisparse:
-            from sglang.srt.mem_cache.sparsity import parse_hisparse_config
-
-            indexer_ratio = self._hisparse_indexer_ratio = parse_hisparse_config(
-                kvc.server_args
-            ).host_to_device_ratio
-        else:
-            self._hisparse_indexer_ratio = indexer_ratio
-
         from sglang.srt.mem_cache.kv_cache_configurator import (
             _should_elide_dsa_index_k,
         )
@@ -445,7 +431,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 num_indexer_layers = len(active_indexer_layers)
 
         return int(
-            indexer_size_per_token * num_indexer_layers * element_size * indexer_ratio
+            indexer_size_per_token * num_indexer_layers * element_size
         )
 
     def calculate_pool_sizes(

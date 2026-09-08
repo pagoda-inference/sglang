@@ -68,10 +68,10 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
                 )
                 self.assertEqual(cell_size, expected_cell_size)
 
-    def test_hisparse_indexer_scales_with_ratio(self):
+    def test_prefill_hisparse_indexer_does_not_scale_with_ratio(self):
         for host_to_device_ratio, expected_cell_size in (
-            (2, 1840),
-            (4, 2368),
+            (2, 1576),
+            (4, 1576),
         ):
             with self.subTest(host_to_device_ratio=host_to_device_ratio):
                 cell_size = self._compute_cell_size(
