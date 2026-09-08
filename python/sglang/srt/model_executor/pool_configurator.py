@@ -60,6 +60,7 @@ class MemoryPoolConfig:
     max_running_requests: Optional[int] = None
     full_max_total_num_tokens: Optional[int] = None
     swa_max_total_num_tokens: Optional[int] = None
+    hisparse_device_num_tokens: Optional[int] = None
 
     # DSV4 compressed-attention pool sizes (target only; draft workers leave at 0).
     c4_max_total_num_tokens: int = 0
@@ -147,6 +148,11 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
 
     def __init__(self, kvc: KVCacheConfigurator):
         self.kv_cache_dtype_str = kvc.kv_cache_dtype_str
+        self.use_hisparse_memory_config = False
+        self._main_kv_size = 0
+        self._indexer_kv_size = 0
+        self._indexer_kv_base_size = 0
+        self._hisparse_indexer_ratio = 1
         # Determine effective number of layers for KV cache
         if mambaish := mambaish_config(kvc.model_config):
             effective_layer_ids = [
@@ -159,6 +165,27 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             num_layers = kvc.layer_info.num_effective_layers
 
         self._cell_size = self._compute_cell_size(kvc, num_layers)
+        self.use_hisparse_memory_config = (
+            get_memory().enable_hisparse
+            and kvc.use_mla_backend
+            and not kvc.is_draft_worker
+            and self._indexer_kv_size > 0
+            and get_disagg().disaggregation_mode == "decode"
+        )
+        if self.use_hisparse_memory_config:
+            from sglang.srt.mem_cache.sparsity import parse_hisparse_config
+
+            hisparse_config = parse_hisparse_config(kvc.server_args)
+            self._hisparse_device_buffer_size = hisparse_config.device_buffer_size
+            self._hisparse_host_to_device_ratio = hisparse_config.host_to_device_ratio
+            max_running_requests = get_schedule().max_running_requests
+            if max_running_requests is None:
+                raise RuntimeError(
+                    "HiSparse decode memory sizing requires --max-running-requests."
+                )
+            self._hisparse_max_running_requests = max(
+                max_running_requests // kvc.ps.attn_dp_size, 1
+            )
         has_kv_on_another_pp_stage = (
             self._cell_size == 0
             and mambaish is not None
@@ -277,9 +304,14 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
 
             # Add indexer KV cache overhead for DSA models (DeepSeek V3.2)
             if is_deepseek_dsa(model_config.hf_config):
+                self._main_kv_size = cell_size
                 cell_size += self._compute_dsa_indexer_cell_size(
                     kvc=kvc,
                     num_layers=num_layers,
+                )
+                self._indexer_kv_size = cell_size - self._main_kv_size
+                self._indexer_kv_base_size = (
+                    self._indexer_kv_size // self._hisparse_indexer_ratio
                 )
         elif is_minimax_sparse(model_config.hf_config):
             # Mirrors MiniMaxSparseKVPool: main pool (K+V all layers) + indexer pool
@@ -368,7 +400,11 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         if memory_config.enable_hisparse:
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
-            indexer_ratio = parse_hisparse_config(kvc.server_args).host_to_device_ratio
+            indexer_ratio = self._hisparse_indexer_ratio = parse_hisparse_config(
+                kvc.server_args
+            ).host_to_device_ratio
+        else:
+            self._hisparse_indexer_ratio = indexer_ratio
 
         from sglang.srt.mem_cache.kv_cache_configurator import (
             _should_elide_dsa_index_k,
@@ -415,6 +451,49 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
     def calculate_pool_sizes(
         self, available_bytes: int, page_size: int
     ) -> MemoryPoolConfig:
+        if self.use_hisparse_memory_config:
+            host_to_device_ratio = self._hisparse_host_to_device_ratio
+            hot_tokens = (
+                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+            )
+            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            remaining_gpu_bytes = available_bytes - hot_tokens * self._main_kv_size
+            if remaining_gpu_bytes <= 0:
+                raise RuntimeError(
+                    "HiSparse GPU memory cannot fit the required hot buffer: "
+                    f"hot_tokens={hot_tokens}, main_kv_size={self._main_kv_size}, "
+                    f"available_bytes={available_bytes}"
+                )
+
+            gpu_limited_tokens = remaining_gpu_bytes // self._indexer_kv_base_size
+            cpu_limited_tokens = (
+                available_bytes * host_to_device_ratio
+            ) // self._main_kv_size
+            max_total_num_tokens = min(gpu_limited_tokens, cpu_limited_tokens)
+            max_total_num_tokens = max_total_num_tokens // page_size * page_size
+            min_logical_tokens = hot_tokens * host_to_device_ratio
+            if max_total_num_tokens < min_logical_tokens:
+                raise RuntimeError(
+                    "HiSparse memory config cannot fit the requested device-to-host "
+                    f"capacity ratio: max_total_num_tokens={max_total_num_tokens}, "
+                    f"min_logical_tokens={min_logical_tokens}, hot_tokens={hot_tokens}, "
+                    f"host_to_device_ratio={host_to_device_ratio}"
+                )
+            logger.info(
+                "HiSparse memory config: logical_tokens=%d, device_hot_tokens=%d, "
+                "host_to_device_ratio=%s, main_kv_bytes_per_token=%d, "
+                "indexer_bytes_per_token=%d",
+                max_total_num_tokens,
+                hot_tokens,
+                host_to_device_ratio,
+                self._main_kv_size,
+                self._indexer_kv_base_size,
+            )
+            return MemoryPoolConfig(
+                max_total_num_tokens=max_total_num_tokens,
+                hisparse_device_num_tokens=hot_tokens,
+            )
+
         max_total_num_tokens = (
             available_bytes // self._cell_size
             if self._cell_size
@@ -427,6 +506,23 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         self, max_total_num_tokens: int, page_size: int
     ) -> MemoryPoolConfig:
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
+        if self.use_hisparse_memory_config:
+            hot_tokens = (
+                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+            )
+            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            min_logical_tokens = hot_tokens * self._hisparse_host_to_device_ratio
+            if max_total_num_tokens < min_logical_tokens:
+                raise RuntimeError(
+                    "The constrained HiSparse token capacity is smaller than the "
+                    "required device-to-host capacity: "
+                    f"max_total_num_tokens={max_total_num_tokens}, "
+                    f"min_logical_tokens={min_logical_tokens}"
+                )
+            return MemoryPoolConfig(
+                max_total_num_tokens=max_total_num_tokens,
+                hisparse_device_num_tokens=hot_tokens,
+            )
         return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
 
 

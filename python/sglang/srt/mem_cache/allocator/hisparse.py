@@ -1,4 +1,5 @@
 import weakref
+from typing import Optional
 
 import torch
 
@@ -22,9 +23,15 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         kvcache: HiSparseDSATokenToKVPool,
         need_sort: bool,
         host_to_device_ratio: int = 2,
+        use_hisparse_memory_config: bool = True,
+        logical_size: Optional[int] = None,
     ):
         self._kvcache = kvcache
-        self._size_full = size * host_to_device_ratio
+        if logical_size is None:
+            logical_size = (
+                size * host_to_device_ratio if use_hisparse_memory_config else size
+            )
+        self._size_full = logical_size
         self._size_hisparse = size
         self.compress_ratio = 1
         self.dtype = dtype

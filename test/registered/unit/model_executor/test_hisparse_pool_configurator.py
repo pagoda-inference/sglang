@@ -81,6 +81,43 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
                 )
                 self.assertEqual(cell_size, expected_cell_size)
 
+    def _make_hisparse_sizing_configurator(
+        self, *, host_to_device_ratio: int
+    ) -> DefaultPoolConfigurator:
+        configurator = object.__new__(DefaultPoolConfigurator)
+        configurator.use_hisparse_memory_config = True
+        configurator._main_kv_size = 1024
+        configurator._indexer_kv_base_size = 128
+        configurator._hisparse_device_buffer_size = 4096
+        configurator._hisparse_host_to_device_ratio = host_to_device_ratio
+        configurator._hisparse_max_running_requests = 32
+        return configurator
+
+    def test_hisparse_ratio_expands_logical_capacity(self):
+        configs = [
+            self._make_hisparse_sizing_configurator(
+                host_to_device_ratio=host_to_device_ratio
+            ).calculate_pool_sizes(32 * (1 << 30), page_size=64)
+            for host_to_device_ratio in (2, 4, 8)
+        ]
+
+        logical_capacities = [config.max_total_num_tokens for config in configs]
+        self.assertLess(logical_capacities[0], logical_capacities[1])
+        self.assertLessEqual(logical_capacities[1], logical_capacities[2])
+        self.assertEqual(
+            [config.hisparse_device_num_tokens for config in configs],
+            [4096 * 32] * 3,
+        )
+
+    def test_hisparse_constrained_capacity_keeps_device_hot_buffer(self):
+        configurator = self._make_hisparse_sizing_configurator(host_to_device_ratio=2)
+        config = configurator.calculate_pool_sizes_from_max_tokens(
+            1_000_000, page_size=64
+        )
+
+        self.assertEqual(config.max_total_num_tokens, 999_936)
+        self.assertEqual(config.hisparse_device_num_tokens, 4096 * 32)
+
 
 if __name__ == "__main__":
     unittest.main()
