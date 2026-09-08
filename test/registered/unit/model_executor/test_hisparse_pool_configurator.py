@@ -106,7 +106,7 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
         self.assertLessEqual(logical_capacities[1], logical_capacities[2])
         self.assertEqual(
             [config.hisparse_device_num_tokens for config in configs],
-            [4096 * 32] * 3,
+            [(4096 + 64) * 32] * 3,
         )
 
     def test_hisparse_constrained_capacity_keeps_device_hot_buffer(self):
@@ -116,7 +116,15 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
         )
 
         self.assertEqual(config.max_total_num_tokens, 999_936)
-        self.assertEqual(config.hisparse_device_num_tokens, 4096 * 32)
+        self.assertEqual(config.hisparse_device_num_tokens, (4096 + 64) * 32)
+
+    def test_hisparse_hot_buffer_supports_one_dp_worker_warmup(self):
+        configurator = self._make_hisparse_sizing_configurator(host_to_device_ratio=2)
+        configurator._hisparse_max_running_requests = 1
+
+        config = configurator.calculate_pool_sizes(32 * (1 << 30), page_size=64)
+
+        self.assertEqual(config.hisparse_device_num_tokens, 4096 + 64)
 
 
 if __name__ == "__main__":

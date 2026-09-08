@@ -454,9 +454,10 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         if self.use_hisparse_memory_config:
             host_to_device_ratio = self._hisparse_host_to_device_ratio
             hot_tokens = (
-                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+                (self._hisparse_device_buffer_size + page_size)
+                * self._hisparse_max_running_requests
             )
-            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            hot_tokens = ceil_align(hot_tokens, page_size)
             remaining_gpu_bytes = available_bytes - hot_tokens * self._main_kv_size
             if remaining_gpu_bytes <= 0:
                 raise RuntimeError(
@@ -508,9 +509,10 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
         if self.use_hisparse_memory_config:
             hot_tokens = (
-                self._hisparse_device_buffer_size * self._hisparse_max_running_requests
+                (self._hisparse_device_buffer_size + page_size)
+                * self._hisparse_max_running_requests
             )
-            hot_tokens = (hot_tokens + page_size - 1) // page_size * page_size
+            hot_tokens = ceil_align(hot_tokens, page_size)
             min_logical_tokens = hot_tokens * self._hisparse_host_to_device_ratio
             if max_total_num_tokens < min_logical_tokens:
                 raise RuntimeError(
