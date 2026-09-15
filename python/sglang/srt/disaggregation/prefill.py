@@ -1145,7 +1145,8 @@ class SchedulerDisaggregationPrefillMixin:
         """
         Send a prefilled chunk to the decode server
         """
-        page_size = self.token_to_kv_pool_allocator.page_size
+        token_to_kv_pool = self.token_to_kv_pool_allocator.get_kvcache()
+        page_size = token_to_kv_pool.page_size
         start_idx = req.start_send_idx
         transfer_input_len = len(req.origin_input_ids)
         end_idx = (
@@ -1185,6 +1186,7 @@ class SchedulerDisaggregationPrefillMixin:
             # scoped, so its transfer index must use the logical input length
             # that decode used to register the destination row.
             seq_len = min(req.extend_range.end, transfer_input_len)
+            swa_state_page_size = getattr(token_to_kv_pool, "swa_page_size", page_size)
             c128_seq_len = transfer_input_len
 
             def _mamba_payload():
@@ -1201,7 +1203,9 @@ class SchedulerDisaggregationPrefillMixin:
             def _swa_payload():
                 window_size = self.sliding_window_size
                 window_start = max(req.disagg_decode_prefix_len, seq_len - window_size)
-                window_start = (window_start // page_size) * page_size
+                window_start = (window_start // swa_state_page_size) * (
+                    swa_state_page_size
+                )
                 window_kv_indices_full = self.req_to_token_pool.req_to_token[
                     req.req_pool_idx, window_start:seq_len
                 ]
@@ -1210,13 +1214,13 @@ class SchedulerDisaggregationPrefillMixin:
                         window_kv_indices_full
                     )
                 )
-                return kv_to_page_indices(window_kv_indices_swa, page_size)
+                return kv_to_page_indices(window_kv_indices_swa, swa_state_page_size)
 
             def _dsa_payload():
                 kv_indices_full = self.req_to_token_pool.req_to_token[
                     req.req_pool_idx, :seq_len
                 ]
-                return kv_to_page_indices(kv_indices_full, page_size)
+                return kv_to_page_indices(kv_indices_full, token_to_kv_pool.page_size)
 
             def _swa_ring_payload():
                 # Unified_kv SWA ring rows (req_pool_idx*ring_stride + pos%ring_stride)
