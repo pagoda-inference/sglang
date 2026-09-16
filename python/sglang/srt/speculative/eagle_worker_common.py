@@ -194,6 +194,12 @@ def prepare_for_draft_extend(
     can_run_decode_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run_graph(
         forward_batch
     )
+    if (
+        can_run_decode_cuda_graph
+        and batch.hisparse_coordinator is not None
+        and batch.hisparse_coordinator.supports_hisparse_draft_slots()
+    ):
+        can_run_decode_cuda_graph = False
     if not batch.forward_mode.is_idle() and not can_run_decode_cuda_graph:
         draft_model_runner.attn_backend.init_forward_metadata(forward_batch)
         # Planned pre-pad; do NOT opt into post-pad re-plan. DSA's indexer
@@ -310,6 +316,12 @@ def prepare_for_draft(
     can_run_decode_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run_graph(
         forward_batch
     )
+    if (
+        can_run_decode_cuda_graph
+        and batch.hisparse_coordinator is not None
+        and batch.hisparse_coordinator.supports_hisparse_draft_slots()
+    ):
+        can_run_decode_cuda_graph = False
     return forward_batch, can_run_decode_cuda_graph
 
 
@@ -597,6 +609,18 @@ def run_eagle_verify(
             batch.seq_lens,
             accept_lens,
             num_draft_tokens,
+        )
+
+    if (
+        batch.hisparse_coordinator is not None
+        and batch.hisparse_coordinator.supports_hisparse_draft_slots()
+        and not batch.forward_mode.is_idle()
+    ):
+        batch.hisparse_coordinator.finalize_accepted_tokens_spec_v2(
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            verify_cache_locs=batch.out_cache_loc,
+            accept_index=accept_index,
         )
 
     # Update mamba state for hybrid GDN models after verification

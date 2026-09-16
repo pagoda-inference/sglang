@@ -99,6 +99,34 @@ def validate_hisparse(server_args: ServerArgs) -> None:
         server_args.disable_radix_cache
     ), "Hierarchical sparse attention currently requires --disable-radix-cache."
 
+    if server_args.speculative_algorithm is not None:
+        if not server_args.speculative_algorithm.is_eagle():
+            raise ValueError(
+                "HiSparse speculative decoding currently only supports EAGLE/MTP."
+            )
+        if is_v4_hisparse:
+            raise ValueError(
+                "HiSparse speculative decoding is not supported for DeepSeek V4 yet."
+            )
+
+        from sglang.srt.mem_cache.sparsity import parse_hisparse_config
+
+        hisparse_config = parse_hisparse_config(server_args)
+        page_size = hisparse_config.page_size
+        draft_tokens = server_args.speculative_num_draft_tokens or 0
+        if draft_tokens >= page_size:
+            raise ValueError(
+                f"HiSparse extra-page capacity ({page_size - 1} slots) is "
+                f"insufficient for speculative_num_draft_tokens={draft_tokens}. "
+                "Reduce draft tokens or increase the HiSparse page size."
+            )
+        topk = server_args.speculative_eagle_topk or 1
+        if topk > 1:
+            raise ValueError(
+                "HiSparse speculative decoding currently requires "
+                "speculative_eagle_topk=1."
+            )
+
     # DSv4 hisparse handles its own dtype/backend pairing elsewhere; the dtype-
     # aware checks below only apply to the DSA hisparse path.
     if is_hip and is_v4_hisparse:

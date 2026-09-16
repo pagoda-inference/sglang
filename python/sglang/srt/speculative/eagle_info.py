@@ -267,6 +267,42 @@ class EagleDraftInput(SpecInput):
         if self.draft_probs is not None and spec_info.draft_probs is not None:
             self.draft_probs = torch.cat([self.draft_probs, spec_info.draft_probs])
 
+    def slice_single(self, index: int) -> "EagleDraftInput":
+        """Slice one request's draft state for HiSparse staging."""
+        return EagleDraftInput(
+            topk_p=None if self.topk_p is None else self.topk_p[index : index + 1],
+            topk_index=(
+                None if self.topk_index is None else self.topk_index[index : index + 1]
+            ),
+            draft_probs=(
+                None
+                if self.draft_probs is None
+                else self.draft_probs[index : index + 1]
+            ),
+            hidden_states=(
+                None
+                if self.hidden_states is None
+                else self.hidden_states[index : index + 1]
+            ),
+            capture_hidden_mode=self.capture_hidden_mode,
+            dsa_topk_indices=(
+                None
+                if self.dsa_topk_indices is None
+                else self.dsa_topk_indices[index : index + 1]
+            ),
+            bonus_tokens=(
+                None
+                if self.bonus_tokens is None
+                else self.bonus_tokens[index : index + 1]
+            ),
+            kv_indptr=(
+                None if self.kv_indptr is None else self.kv_indptr[index : index + 2]
+            ),
+            kv_indices=self.kv_indices,
+            num_tokens_per_req=self.num_tokens_per_req,
+            num_tokens_for_logprob_per_req=self.num_tokens_for_logprob_per_req,
+        )
+
 
 @dataclass
 class EagleDraftExtendInput(SpecInput):

@@ -842,7 +842,7 @@ class ModelRunner:
         self.graph_shared_output = None
 
     def maybe_init_hisparse_coordinator(self):
-        if not self.enable_hisparse:
+        if not self.enable_hisparse or self.is_draft_worker:
             return
         from sglang.srt.managers.hisparse_coordinator import (
             HiSparseCoordinator,
@@ -1436,9 +1436,16 @@ class ModelRunner:
                 server_args=self.server_args,
             )
 
-        # Hisparse coordinator — backends now read it from self.model_runner.
-        if self.hisparse_coordinator is not None:
-            self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
+        active_hisparse_coordinator = (
+            forward_batch.hisparse_coordinator or self.hisparse_coordinator
+        )
+        forward_batch.hisparse_coordinator = active_hisparse_coordinator
+        if active_hisparse_coordinator is not None:
+            active_hisparse_coordinator.num_real_reqs.fill_(
+                forward_batch._original_batch_size
+                if forward_batch._original_batch_size is not None
+                else forward_batch.batch_size
+            )
 
     def _pp_kwargs(self, pp_proxy_tensors) -> dict:
         """Build the pp_proxy_tensors forward kwarg, in one place.
@@ -1661,13 +1668,21 @@ class ModelRunner:
                 and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
             )
 
-            if (
+            active_hisparse_coordinator = (
+                forward_batch.hisparse_coordinator or self.hisparse_coordinator
+            )
+            if active_hisparse_coordinator is not None and (
                 forward_batch.forward_mode.is_decode()
-                and self.hisparse_coordinator is not None
+                or forward_batch.forward_mode.is_target_verify()
+                or forward_batch.forward_mode.is_draft_extend_v2()
             ):
-                forward_batch.hisparse_coordinator = self.hisparse_coordinator
-                self.hisparse_coordinator.wait_for_pending_backup()
-                self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
+                forward_batch.hisparse_coordinator = active_hisparse_coordinator
+                active_hisparse_coordinator.wait_for_pending_backup()
+                active_hisparse_coordinator.num_real_reqs.fill_(
+                    forward_batch._original_batch_size
+                    if forward_batch._original_batch_size is not None
+                    else forward_batch.batch_size
+                )
 
             # Replay cuda graph if applicable
             if can_run_graph:
