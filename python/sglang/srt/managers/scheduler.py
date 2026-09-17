@@ -990,6 +990,23 @@ class Scheduler(
         if self.draft_worker is not None:
             self.draft_worker.init_cuda_graphs()
 
+    def prewarm_hisparse_speculative_dp_memcpy(self):
+        if not (
+            self.enable_hisparse
+            and not self.spec_algorithm.is_none()
+            and self.enable_dp_attention
+        ):
+            return
+
+        from sglang.srt.layers.dp_attention import prewarm_dp_attention_memcpy
+
+        model_runner = self.tp_worker.model_runner
+        prewarm_dp_attention_memcpy(
+            width=model_runner.model_config.vocab_size,
+            dtype=model_runner.dtype,
+            device=model_runner.device,
+        )
+
     def init_model_worker(self):
         # Load model weights.
         self.init_tp_model_worker()
@@ -1004,6 +1021,7 @@ class Scheduler(
 
         self.init_all_attention_backends()
         self.init_all_cuda_graphs()
+        self.prewarm_hisparse_speculative_dp_memcpy()
 
         model_runner = self.tp_worker.model_runner
         if model_runner.token_to_kv_pool.post_capture_active:

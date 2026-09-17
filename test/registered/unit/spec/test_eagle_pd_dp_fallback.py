@@ -1,9 +1,12 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from sglang.srt.managers.scheduler_components import dp_attn
 from sglang.srt.managers.scheduler_components.dp_attn import MLPSyncBatchInfo
+from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
@@ -155,6 +158,60 @@ class TestEaglePDDPFallback(CustomTestCase):
         self.assertEqual(local_logits.shape, (0, 8))
         self.assertEqual(local_hidden_states.shape, (0, 4))
         self.assertEqual(local_positions.shape, (0,))
+
+    def test_idle_batch_carries_hisparse_coordinator(self):
+        class IdleScheduleBatch:
+            hisparse_coordinator = None
+
+            @classmethod
+            def init_new(cls, *args, **kwargs):
+                return cls()
+
+            def prepare_for_idle(self):
+                pass
+
+        coordinator = object()
+        adapter = object.__new__(dp_attn.SchedulerDPAttnAdapter)
+        object.__setattr__(
+            adapter, "model_runner", SimpleNamespace(hisparse_coordinator=coordinator)
+        )
+        object.__setattr__(adapter, "req_to_token_pool", object())
+        object.__setattr__(adapter, "token_to_kv_pool_allocator", object())
+        object.__setattr__(adapter, "tree_cache", object())
+        object.__setattr__(adapter, "model_config", object())
+        object.__setattr__(adapter, "enable_overlap", False)
+        object.__setattr__(adapter, "spec_algorithm", object())
+
+        with patch.object(dp_attn, "ScheduleBatch", IdleScheduleBatch):
+            idle_batch = adapter.get_idle_batch()
+
+        self.assertIs(idle_batch.hisparse_coordinator, coordinator)
+
+    def test_multistep_hisparse_swap_uses_extra_page_size(self):
+        coordinator = object.__new__(HiSparseCoordinator)
+        coordinator.enable_prefetch = False
+        coordinator.device = "cpu"
+        coordinator.top_k = 2
+        coordinator.mem_pool_device = SimpleNamespace(page_size=64)
+        captured_page_sizes = []
+
+        def swap_in_kernel(*args, **kwargs):
+            captured_page_sizes.append(kwargs["extra_page_size"])
+            return torch.full((1, 2), 7, dtype=torch.int32)
+
+        coordinator._run_swap_in_kernel = swap_in_kernel
+
+        result = HiSparseCoordinator.swap_in_selected_pages(
+            coordinator,
+            req_pool_indices=torch.tensor([0]),
+            compressed_seq_lens=torch.tensor([[8, 9, 10]]),
+            top_k_result=torch.zeros((1, 3, 2), dtype=torch.int32),
+            layer_id=0,
+            num_steps=3,
+        )
+
+        self.assertEqual(captured_page_sizes, [64, 64, 64])
+        self.assertEqual(result.tolist(), [[[7, 7]] * 3])
 
     def test_eager_draft_rejects_missing_local_rows(self):
         with self.assertRaisesRegex(RuntimeError, "next_token_logits has 0 rows"):

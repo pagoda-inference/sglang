@@ -938,7 +938,6 @@ class HiSparseCoordinator:
             device=accepted_cache_locs.device, dtype=torch.int64
         )
         in_hot_buffer = accepted_token_positions < self.device_buffer_size
-        draft_mapping_snapshot = full_to_device_mapping[draft_cache_locs].clone()
         accepted_device_locs = full_to_device_mapping[accepted_cache_locs].clone()
 
         full_to_device_mapping[draft_cache_locs] = 0
@@ -1060,6 +1059,11 @@ class HiSparseCoordinator:
 
         flat_accept_index = accept_index.reshape(-1)
         accepted_offsets = flat_accept_index[flat_accept_index >= 0].to(torch.int64)
+        if accepted_offsets.numel() != total_accepted:
+            raise ValueError(
+                "HiSparse spec-v2 accepted index mismatch: expected "
+                f"{total_accepted} accepted slots, got {accepted_offsets.numel()}."
+            )
         offsets = torch.cat(
             [torch.zeros(1, dtype=torch.int64, device=counts.device), counts.cumsum(0)]
         )
@@ -1265,6 +1269,7 @@ class HiSparseCoordinator:
         top_k_result: torch.Tensor,
         layer_id: int,
         record_plan: bool = False,
+        extra_page_size: int = 1,
     ) -> torch.Tensor:
         """Run the full plan+IO swap-in kernel for one layer; return its slot table.
 
@@ -1302,7 +1307,7 @@ class HiSparseCoordinator:
             item_size_bytes=self.item_size_bytes,
             num_top_k=self.top_k,
             hot_buffer_size=self.device_buffer_size,
-            page_size=1,
+            page_size=extra_page_size,
             block_size=self.swap_in_block_size,
             num_real_reqs=self.num_real_reqs,
             skip_io=self.skip_io,
@@ -1372,6 +1377,7 @@ class HiSparseCoordinator:
                     step_seq_lens[:, step].contiguous(),
                     top_k_result[:, step, :],
                     layer_id,
+                    extra_page_size=self.mem_pool_device.page_size,
                 )
                 result[:, step, :].copy_(step_locs)
             return result

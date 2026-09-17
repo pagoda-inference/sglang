@@ -126,6 +126,28 @@ _is_xpu = is_xpu()
 logger = logging.getLogger(__name__)
 
 
+def _log_hisparse_spec_phase(phase, rank, batch, spec_info=None):
+    if not envs.SGLANG_ENABLE_HISPARSE_SPEC_PHASE_DEBUG.get():
+        return
+    spec_info = batch.spec_info if spec_info is None else spec_info
+    logger.info(
+        "HiSparse spec phase: rank=%s phase=%s mode=%s bs=%s iter=%s "
+        "spec_type=%s spec_width=%s global_requests=%s can_target_graph=%s "
+        "can_draft_graph=%s force_draft_eager=%s",
+        rank,
+        phase,
+        batch.forward_mode.name,
+        len(batch.seq_lens),
+        batch.forward_iter,
+        type(spec_info).__name__,
+        getattr(spec_info, "num_tokens_per_req", None),
+        batch.global_num_tokens,
+        batch.can_run_dp_cuda_graph,
+        batch.can_run_dp_draft_cuda_graph,
+        batch.force_disable_draft_cuda_graph,
+    )
+
+
 def _slice_draft_output_to_local_tokens(
     next_token_logits: torch.Tensor,
     hidden_states: Optional[torch.Tensor],
@@ -1204,6 +1226,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 return batch_output
         else:
             self.activate_step_by_batch(batch.seq_lens.shape[0])
+            _log_hisparse_spec_phase("start", self.ps.attn_dp_rank, batch)
 
             if batch.spec_info is None:
                 capture_mode = (
@@ -1236,9 +1259,14 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     spec_stage_span("draft"),
                 ):
                     verify_input: EagleVerifyInput = self.draft_worker.draft(batch)
+            _log_hisparse_spec_phase(
+                "after-draft", self.ps.attn_dp_rank, batch, verify_input
+            )
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
+            _log_hisparse_spec_phase("before-verify", self.ps.attn_dp_rank, batch)
             batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
+            _log_hisparse_spec_phase("after-verify", self.ps.attn_dp_rank, batch)
             # Publish before draft_extend so the fence is at verify-end.
             if on_publish is not None:
                 on_publish(batch_output.new_seq_lens)
@@ -1257,6 +1285,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     spec_stage_span("draft_extend"),
                 ):
                     self.draft_worker._draft_extend_for_decode(batch, batch_output)
+            _log_hisparse_spec_phase("after-draft-extend", self.ps.attn_dp_rank, batch)
 
             return batch_output
 

@@ -1120,6 +1120,7 @@ class Envs:
     # ===================================================================
     # Speculative decoding
     # ===================================================================
+    SGLANG_ENABLE_HISPARSE_SPEC_PHASE_DEBUG = EnvBool(False)
     SGLANG_ENABLE_OVERLAP_PLAN_STREAM = EnvBool(False)
     # A/B: keep the DFLASH draft greedy head eager (not folded in-graph).
     SGLANG_DFLASH_EAGER_DRAFT_SAMPLER = EnvBool(False)
