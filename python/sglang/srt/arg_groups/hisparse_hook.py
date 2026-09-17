@@ -117,7 +117,10 @@ def validate_hisparse(server_args: ServerArgs) -> None:
         from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
         hisparse_config = parse_hisparse_config(server_args)
-        page_size = hisparse_config.page_size
+        page_size = hisparse_config.page_size or server_args.page_size
+        assert (
+            page_size is not None and page_size > 0
+        ), "HiSparse speculative decoding requires a positive page size."
         draft_tokens = server_args.speculative_num_draft_tokens or 0
         if draft_tokens >= page_size:
             raise ValueError(
