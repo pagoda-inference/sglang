@@ -100,7 +100,12 @@ def validate_hisparse(server_args: ServerArgs) -> None:
     ), "Hierarchical sparse attention currently requires --disable-radix-cache."
 
     if server_args.speculative_algorithm is not None:
-        if not server_args.speculative_algorithm.is_eagle():
+        from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+        speculative_algorithm = SpeculativeAlgorithm.from_string(
+            server_args.speculative_algorithm
+        )
+        if not speculative_algorithm.is_eagle():
             raise ValueError(
                 "HiSparse speculative decoding currently only supports EAGLE/MTP."
             )
