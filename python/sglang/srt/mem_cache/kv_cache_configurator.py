@@ -1764,6 +1764,20 @@ class KVCacheConfigurator:
 
         else:
             assert self.is_draft_worker
+            if get_memory().enable_hisparse and isinstance(
+                token_to_kv_pool, HiSparseDSATokenToKVPool
+            ):
+                # Draft EAGLE does not own a HiSparse coordinator. It stores
+                # one dense slot per target logical slot, so map them 1:1.
+                identity_size = token_to_kv_pool.logical_size + self.page_size
+                identity_mapping = torch.arange(
+                    identity_size + 1,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                identity_mapping[-1] = -1
+                token_to_kv_pool.register_mapping(identity_mapping)
+
             if self.is_hybrid_swa:
                 if self.draft_swa_full_capacity:
                     # Banded depth: the SWA ring is full draft capacity, so use
