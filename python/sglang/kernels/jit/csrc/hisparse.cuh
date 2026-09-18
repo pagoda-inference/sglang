@@ -389,7 +389,6 @@ __global__ void load_cache_to_device_buffer_kernel(
     int64_t top_k_device_locs_stride,
     int64_t page_size,
     int64_t item_size_bytes,
-    int64_t num_steps,
     int64_t* __restrict__ miss_src_out,
     int32_t* __restrict__ miss_dst_out,
     int32_t* __restrict__ miss_count_out,
@@ -402,14 +401,13 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
-  int32_t* req_top_k_device_locs_base =
-      top_k_device_locs + bid * top_k_device_locs_stride;
+  int32_t* req_top_k_device_locs = top_k_device_locs + bid * top_k_device_locs_stride;
 
   // CUDA graph pads the batch to a captured size. Keep padded output rows
   // invalid without a separate fill kernel.
   if (bid >= num_real_reqs[0]) {
-    for (int i = tid; i < NUM_TOP_K * num_steps; i += BLOCK_SIZE) {
-      req_top_k_device_locs_base[i] = -1;
+    for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
+      req_top_k_device_locs[i] = -1;
     }
     return;
   }
@@ -419,13 +417,10 @@ __global__ void load_cache_to_device_buffer_kernel(
   const BallotMask lanes_before = (BallotMask(1) << lane_id) - BallotMask(1);
 
   const int64_t rid = req_pool_indices[bid];
+  const int64_t seq_len = seq_lens[bid];
 
-  for (int64_t step = 0; step < num_steps; ++step) {
-    const int64_t seq_len = seq_lens[bid * num_steps + step];
-    const int32_t* req_top_k_tokens =
-        top_k_tokens + bid * top_k_tokens_stride + step * NUM_TOP_K;
-    int32_t* req_top_k_device_locs =
-        req_top_k_device_locs_base + step * NUM_TOP_K;
+  // Calculate offsets for this request
+  const int32_t* req_top_k_tokens = top_k_tokens + bid * top_k_tokens_stride;
 
   const int64_t buffer_offset = rid * buffer_stride_0;
   int32_t* req_device_buffer_tokens = device_buffer_tokens + buffer_offset;
@@ -463,7 +458,7 @@ __global__ void load_cache_to_device_buffer_kernel(
         miss_count_out[bid] = 0;
       }
     }
-    continue;
+    return;
   }
 
   // Dynamic shared memory layout: int32_t arrays first, then int16_t arrays.
@@ -744,12 +739,6 @@ __global__ void load_cache_to_device_buffer_kernel(
           lane_id, host_cache_k, host_cache_v, device_buffer_k, device_buffer_v, src_loc, dst_loc, item_size_bytes);
     }
   }
-
-    if (step + 1 < num_steps) {
-      __threadfence_block();
-      __syncthreads();
-    }
-  }
 }
 
 template <
@@ -776,7 +765,6 @@ void load_cache_to_device_buffer(
     tvm::ffi::TensorView num_real_reqs,
     int64_t page_size,
     int64_t item_size_bytes,
-    int64_t num_steps,
     tvm::ffi::TensorView miss_src_out,
     tvm::ffi::TensorView miss_dst_out,
     tvm::ffi::TensorView miss_count_out) {
@@ -829,7 +817,6 @@ void load_cache_to_device_buffer(
         top_k_device_locs_stride,
         page_size,
         item_size_bytes,
-        num_steps,
         miss_src_ptr,
         miss_dst_ptr,
         miss_count_ptr,

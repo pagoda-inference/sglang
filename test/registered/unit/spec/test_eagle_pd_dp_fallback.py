@@ -193,12 +193,11 @@ class TestEaglePDDPFallback(CustomTestCase):
         coordinator.device = "cpu"
         coordinator.top_k = 2
         coordinator.mem_pool_device = SimpleNamespace(page_size=64)
-        captured_calls = []
+        captured_page_sizes = []
 
         def swap_in_kernel(*args, **kwargs):
-            captured_calls.append((args, kwargs))
-            kwargs["top_k_device_locs"].fill_(7)
-            return kwargs["top_k_device_locs"]
+            captured_page_sizes.append(kwargs["extra_page_size"])
+            return torch.full((1, 2), 7, dtype=torch.int32)
 
         coordinator._run_swap_in_kernel = swap_in_kernel
 
@@ -211,13 +210,7 @@ class TestEaglePDDPFallback(CustomTestCase):
             num_steps=3,
         )
 
-        self.assertEqual(len(captured_calls), 1)
-        args, kwargs = captured_calls[0]
-        self.assertEqual(args[0].tolist(), [0])
-        self.assertEqual(args[1].tolist(), [8, 9, 10])
-        self.assertEqual(args[2].shape, (1, 3, 2))
-        self.assertEqual(kwargs["extra_page_size"], 64)
-        self.assertEqual(kwargs["num_steps"], 3)
+        self.assertEqual(captured_page_sizes, [64, 64, 64])
         self.assertEqual(result.tolist(), [[[7, 7]] * 3])
 
     def test_eager_draft_rejects_missing_local_rows(self):

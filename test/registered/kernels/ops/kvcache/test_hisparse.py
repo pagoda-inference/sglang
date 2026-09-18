@@ -183,52 +183,6 @@ def _make_state(
     }
 
 
-def test_load_cache_to_device_buffer_fuses_multistep_lru_reuse() -> None:
-    state = _make_state(
-        [[0, 1, 2, 3, 4, 5]],
-        [[0, 1, 2, 3, 4, -1]],
-        [4],
-    )
-    top_k_tokens = torch.tensor(
-        [[[5, 6, 7], [5, 6, 7]]], dtype=torch.int32, device=DEVICE
-    )
-    out = torch.full_like(top_k_tokens, -1)
-
-    load_cache_to_device_buffer_mla(
-        top_k_tokens=top_k_tokens,
-        device_buffer_tokens=state["device_buffer_tokens"],
-        host_cache_locs=state["host_cache_locs"],
-        device_buffer_locs=state["device_buffer_locs"],
-        host_cache=state["host_cache"],
-        device_buffer=state["device_buffer"],
-        top_k_device_locs=out,
-        req_pool_indices=torch.arange(1, dtype=torch.int64, device=DEVICE),
-        seq_lens=torch.tensor([8, 9], dtype=torch.int32, device=DEVICE),
-        lru_slots=state["lru_slots"],
-        item_size_bytes=ITEM_SIZE_BYTES,
-        num_top_k=3,
-        hot_buffer_size=HOT_BUFFER_SIZE,
-        page_size=2,
-        block_size=256,
-        num_real_reqs=torch.tensor([1], dtype=torch.int32, device=DEVICE),
-        num_steps=2,
-    )
-    torch.cuda.synchronize()
-
-    assert torch.equal(out[:, 0].cpu(), out[:, 1].cpu())
-    assert set(state["device_buffer_tokens"][0, :HOT_BUFFER_SIZE].cpu().tolist()) == {
-        3,
-        5,
-        6,
-        7,
-    }
-    for token, device_loc in zip([5, 6, 7], out[0, 0].cpu().tolist()):
-        assert torch.equal(
-            state["device_buffer"][device_loc].cpu(),
-            state["host_cache"][token],
-        )
-
-
 @pytest.mark.skipif(is_hip(), reason="DSV4 paged-layout HiSparse test is CUDA-only.")
 def test_transfer_cache_dsv4_mla_copies_paged_token() -> None:
     src_cache = torch.zeros((2, DSV4_PAGE_BYTES), dtype=torch.uint8, device=DEVICE)

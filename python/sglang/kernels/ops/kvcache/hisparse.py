@@ -10,7 +10,7 @@ from sglang.kernels.jit.utils import load_jit, make_cpp_args
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
-_HISPARSE_JIT_CACHE_VERSION = 3
+_HISPARSE_JIT_CACHE_VERSION = 2
 
 
 @functools.cache
@@ -135,7 +135,6 @@ def _load_cache_to_device_buffer_mla(
     page_size: int,
     block_size: int,
     num_real_reqs: torch.Tensor | None,
-    num_steps: int,
     miss_src: torch.Tensor | None,
     miss_dst: torch.Tensor | None,
     miss_count: torch.Tensor | None,
@@ -145,23 +144,7 @@ def _load_cache_to_device_buffer_mla(
         hot_buffer_size >= num_top_k
     ), f"hot_buffer_size ({hot_buffer_size}) must be >= num_top_k ({num_top_k})"
 
-    assert num_steps > 0
-    if num_steps > 1:
-        assert top_k_tokens.ndim == 3
-        assert top_k_tokens.shape[1] == num_steps
-        assert top_k_tokens.shape[2] == num_top_k
-        assert top_k_device_locs.ndim == 3
-        assert top_k_device_locs.shape[1] == num_steps
-        assert top_k_device_locs.shape[2] == num_top_k
-        assert req_pool_indices.numel() == top_k_tokens.shape[0]
-        assert seq_lens.numel() == req_pool_indices.numel() * num_steps
-        if top_k_tokens.stride(1) != num_top_k or top_k_tokens.stride(2) != 1:
-            top_k_tokens = top_k_tokens.contiguous()
-        if top_k_device_locs.stride(1) != num_top_k or top_k_device_locs.stride(2) != 1:
-            raise ValueError("top_k_device_locs must be step-contiguous")
-
     record_miss_plan = miss_src is not None
-    assert not (record_miss_plan and num_steps > 1)
     module = _jit_sparse_module(
         item_size_bytes,
         block_size,
@@ -206,7 +189,6 @@ def _load_cache_to_device_buffer_mla(
         num_real_reqs,
         page_size,
         item_size_bytes,
-        num_steps,
         miss_src,
         miss_dst,
         miss_count,
@@ -230,7 +212,6 @@ def load_cache_to_device_buffer_mla(
     page_size: int = 1,
     block_size: int = 256,
     num_real_reqs: torch.Tensor | None = None,
-    num_steps: int = 1,
     miss_src: torch.Tensor | None = None,
     miss_dst: torch.Tensor | None = None,
     miss_count: torch.Tensor | None = None,
@@ -259,7 +240,6 @@ def load_cache_to_device_buffer_mla(
         page_size=page_size,
         block_size=block_size,
         num_real_reqs=num_real_reqs,
-        num_steps=num_steps,
         miss_src=miss_src,
         miss_dst=miss_dst,
         miss_count=miss_count,
@@ -321,7 +301,6 @@ def load_cache_to_device_buffer_dsv4_mla(
     page_size: int = 1,
     block_size: int = 256,
     num_real_reqs: torch.Tensor | None = None,
-    num_steps: int = 1,
     miss_src: torch.Tensor | None = None,
     miss_dst: torch.Tensor | None = None,
     miss_count: torch.Tensor | None = None,
@@ -346,7 +325,6 @@ def load_cache_to_device_buffer_dsv4_mla(
         page_size=page_size,
         block_size=block_size,
         num_real_reqs=num_real_reqs,
-        num_steps=num_steps,
         miss_src=miss_src,
         miss_dst=miss_dst,
         miss_count=miss_count,
