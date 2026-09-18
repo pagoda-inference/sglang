@@ -1270,6 +1270,8 @@ class HiSparseCoordinator:
         layer_id: int,
         record_plan: bool = False,
         extra_page_size: int = 1,
+        num_steps: int = 1,
+        top_k_device_locs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run the full plan+IO swap-in kernel for one layer; return its slot table.
 
@@ -1277,7 +1279,11 @@ class HiSparseCoordinator:
         miss plan into self._miss_{src,dst,count} for the skip layers to replay.
         """
         num_reqs = req_pool_indices.size(0)
-        top_k_indices = self.top_k_device_locs_buffer[:num_reqs]
+        top_k_indices = (
+            self.top_k_device_locs_buffer[:num_reqs]
+            if top_k_device_locs is None
+            else top_k_device_locs
+        )
 
         swap_in_fn = (
             load_cache_to_device_buffer_dsv4_mla
@@ -1310,6 +1316,7 @@ class HiSparseCoordinator:
             page_size=extra_page_size,
             block_size=self.swap_in_block_size,
             num_real_reqs=self.num_real_reqs,
+            num_steps=num_steps,
             skip_io=self.skip_io,
             **plan,
         )
@@ -1363,24 +1370,19 @@ class HiSparseCoordinator:
                     f"got {compressed_seq_lens.numel()}"
                 )
 
-            result = torch.empty(
-                (req_pool_indices.numel(), num_steps, self.top_k),
-                dtype=torch.int32,
-                device=self.device,
+            return self._run_swap_in_kernel(
+                req_pool_indices,
+                compressed_seq_lens.reshape(-1).contiguous(),
+                top_k_result,
+                layer_id,
+                extra_page_size=self.mem_pool_device.page_size,
+                num_steps=num_steps,
+                top_k_device_locs=torch.empty(
+                    (req_pool_indices.numel(), num_steps, self.top_k),
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
             )
-            step_seq_lens = compressed_seq_lens.view(
-                req_pool_indices.numel(), num_steps
-            )
-            for step in range(num_steps):
-                step_locs = self._run_swap_in_kernel(
-                    req_pool_indices,
-                    step_seq_lens[:, step].contiguous(),
-                    top_k_result[:, step, :],
-                    layer_id,
-                    extra_page_size=self.mem_pool_device.page_size,
-                )
-                result[:, step, :].copy_(step_locs)
-            return result
 
         if not self.enable_prefetch:
             return self._run_swap_in_kernel(
