@@ -657,7 +657,8 @@ def alloc_for_spec_decode(
     batch: Optional[ScheduleBatch] = None,
 ) -> None:
     if num_needed_tokens > 0:
-        if tree_cache.token_to_kv_pool_allocator.page_size == 1:
+        allocator = tree_cache.token_to_kv_pool_allocator
+        if allocator.page_size == 1:
             out_cache_loc = alloc_token_slots(tree_cache, num_needed_tokens)
         else:
             last_loc = get_last_loc(
@@ -666,17 +667,27 @@ def alloc_for_spec_decode(
             device_type = getattr(
                 batch.device, "type", str(batch.device).split(":", 1)[0]
             )
-            out_cache_loc = ALLOC_EXTEND_FUNCS[device_type](
-                tree_cache,
-                cur_kv_lens,
-                cur_kv_lens_cpu,
-                nxt_kv_lens,
-                nxt_kv_lens_cpu,
-                last_loc,
-                num_needed_tokens,
-                req_pool_indices=req_pool_indices,
-                batch=batch,
-            )
+            if hasattr(allocator, 'alloc_logical_only'):
+                out_cache_loc = allocator.alloc_logical_only(
+                    prefix_lens=cur_kv_lens,
+                    prefix_lens_cpu=cur_kv_lens_cpu,
+                    seq_lens=nxt_kv_lens,
+                    seq_lens_cpu=nxt_kv_lens_cpu,
+                    last_loc=last_loc,
+                    extend_num_tokens=num_needed_tokens,
+                )
+            else:
+                out_cache_loc = ALLOC_EXTEND_FUNCS[device_type](
+                    tree_cache,
+                    cur_kv_lens,
+                    cur_kv_lens_cpu,
+                    nxt_kv_lens,
+                    nxt_kv_lens_cpu,
+                    last_loc,
+                    num_needed_tokens,
+                    req_pool_indices=req_pool_indices,
+                    batch=batch,
+                )
         # Updating req_to_token is a write to a shared tensor: it must not overlap
         # with the previous batch's forward, which also reads req_to_token.
         assign_req_to_token_pool_func(
