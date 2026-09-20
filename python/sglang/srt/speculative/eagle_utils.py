@@ -505,6 +505,9 @@ def eagle_prepare_for_verify(
         ForwardMode,
     )
     from sglang.srt.speculative.spec_utils import prepare_mamba_track_for_verify
+    from sglang.srt.speculative.eagle_worker_common import (
+        _prepare_hisparse_target_verify,
+    )
 
     if not batch.forward_mode.is_idle():
         # Assign cache locations
@@ -531,6 +534,9 @@ def eagle_prepare_for_verify(
 
         batch.out_cache_loc_dsv4 = maybe_build_dsv4_verify_bundle(
             batch, verify_input.draft_token_num
+        )
+        _prepare_hisparse_target_verify(
+            batch, verify_input.draft_token_num, verify_input.topk
         )
 
         prepare_mamba_track_for_verify(batch)
@@ -560,6 +566,7 @@ def eagle_prepare_for_verify(
     # Run attention backend plan and cuda graph preparation
     can_run_cuda_graph = bool(
         target_worker.model_runner.decode_cuda_graph_runner
+        and batch.hisparse_coordinator is None
         and target_worker.model_runner.decode_cuda_graph_runner.can_run_graph(
             verify_forward_batch
         )

@@ -392,6 +392,7 @@ class KVCacheConfigurator:
     ) -> _InitializedPools:
         """Initialize the memory pools."""
         token_to_kv_pool = None
+        shared_target_allocator = token_to_kv_pool_allocator
 
         # Unified-pool fast path: build req_to_token + token_to_kv pool + allocator
         # from one byte buffer, then return. Gated to the target worker
@@ -534,6 +535,37 @@ class KVCacheConfigurator:
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
+
+        if self.is_draft_worker and get_memory().enable_hisparse:
+            if shared_target_allocator is None or not isinstance(
+                shared_target_allocator, HiSparseTokenToKVPoolAllocator
+            ):
+                raise RuntimeError(
+                    "Target-only HiSparse speculative decoding requires the draft "
+                    "runner to share the target HiSparse logical allocator."
+                )
+            if not isinstance(token_to_kv_pool, DSATokenToKVPool) or isinstance(
+                token_to_kv_pool, HiSparseDSATokenToKVPool
+            ):
+                raise RuntimeError(
+                    "Target-only HiSparse speculative decoding requires a dense "
+                    "DSA KV pool for the draft runner."
+                )
+            if token_to_kv_pool.size < shared_target_allocator.size_full:
+                raise RuntimeError(
+                    "Draft dense KV pool is smaller than the shared logical "
+                    f"allocator: {token_to_kv_pool.size} < "
+                    f"{shared_target_allocator.size_full}"
+                )
+        if (
+            is_dsv4_model
+            and get_memory().enable_hisparse
+            and not self.spec_algorithm.is_none()
+        ):
+            raise NotImplementedError(
+                "Target-only HiSparse speculative decoding is currently implemented "
+                "for generic DSA pools, not DeepSeek-V4 pools"
+            )
 
         # Defensive check: the explicit validation above should reject known
         # unsupported pool families before allocation. Keep this guard here so
@@ -1137,7 +1169,9 @@ class KVCacheConfigurator:
             compression_ratios=compression_ratios,
             start_layer=self.layer_info.start_layer,
             end_layer=self.layer_info.end_layer,
-            enable_hisparse=get_memory().enable_hisparse,
+            enable_hisparse=(
+                get_memory().enable_hisparse and not self.is_draft_worker
+            ),
             online_mtp_max_draft_tokens=(max_speculative_num_draft_tokens() or 0),
         )
         return token_to_kv_pool
@@ -1329,7 +1363,9 @@ class KVCacheConfigurator:
         ) = get_glm_dsa_cp_layer_shard_info(self)
         pool_kwargs = {}
         pool_num_tokens = max_total_num_tokens
-        if get_memory().enable_hisparse:
+        if self.is_draft_worker:
+            PoolCls = DSATokenToKVPool
+        elif get_memory().enable_hisparse:
             PoolCls = HiSparseDSATokenToKVPool
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 

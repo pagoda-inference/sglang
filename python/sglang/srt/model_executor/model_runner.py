@@ -351,7 +351,7 @@ class ModelRunner:
         self._pending_elastic_scale_update = None
         self.init_new_workspace = False
         self.draft_model_idx = draft_model_idx
-        self.enable_hisparse = server_args.enable_hisparse
+        self.enable_hisparse = server_args.enable_hisparse and not is_draft_worker
 
         self.init_startup_observability()
 
@@ -842,7 +842,7 @@ class ModelRunner:
         self.graph_shared_output = None
 
     def maybe_init_hisparse_coordinator(self):
-        if not self.enable_hisparse:
+        if not self.enable_hisparse or self.is_draft_worker:
             return
         from sglang.srt.managers.hisparse_coordinator import (
             HiSparseCoordinator,

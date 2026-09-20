@@ -7,6 +7,7 @@ import torch
 
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+from sglang.srt.utils.async_probe import maybe_detect_oob
 from sglang.srt.utils import is_cuda, is_hip
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,18 @@ class HiSparseDSATokenToKVPool(DSATokenToKVPool):
             item_size=self.bytes_per_token,
             num_layers=self.layer_num,
         )
+
+    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
+        size_limit = self.logical_size + self.page_size
+        maybe_detect_oob(tgt_loc, 0, size_limit, "move_kv_cache tgt_loc")
+        maybe_detect_oob(src_loc, 0, size_limit, "move_kv_cache src_loc")
+        if tgt_loc.numel() == 0:
+            return
+        self.transfer_values_on_device(
+            self.translate_loc_to_hisparse_device(tgt_loc),
+            self.translate_loc_to_hisparse_device(src_loc),
+        )
+        self.index_key_cache.move(tgt_loc, src_loc)
 
     def get_cpu_copy(self, indices, mamba_indices=None):
         raise NotImplementedError("HiSparseDevicePool does not support get_cpu_copy")

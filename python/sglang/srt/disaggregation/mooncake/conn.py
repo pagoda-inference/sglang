@@ -85,6 +85,7 @@ class TransferInfo:
     is_dummy: bool
     decode_prefix_len: Optional[int] = None
     dst_device_kv_indices: Optional[npt.NDArray[np.int32]] = None
+    dst_draft_kv_indices: Optional[npt.NDArray[np.int32]] = None
     # Note: always put the optional staging field at the final (it will be set through 'STAGING_RSP' pkg when needed)
     staging: Optional[StagingTransferInfo] = None
 
@@ -118,6 +119,11 @@ class TransferInfo:
                 if len(msg) > 9 and msg[9] != b""
                 else None
             ),
+            dst_draft_kv_indices=(
+                np.frombuffer(msg[10], dtype=np.int32)
+                if len(msg) > 10 and msg[10] != b""
+                else None
+            ),
         )
 
 
@@ -145,6 +151,8 @@ class KVArgsRegisterInfo:
     dcp_token_item_lens: Optional[List[int]] = None
     staging_base_ptr: int = 0
     staging_total_size: int = 0
+    dst_target_kv_data_ptr_count: int = 0
+    dst_draft_kv_data_ptr_count: int = 0
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -188,6 +196,12 @@ class KVArgsRegisterInfo:
             ),
             dst_dcp_rank=(
                 int(msg[17].decode("ascii")) if len(msg) > 17 and msg[17] != b"" else 0
+            ),
+            dst_target_kv_data_ptr_count=(
+                int(msg[18].decode("ascii")) if len(msg) > 18 and msg[18] != b"" else 0
+            ),
+            dst_draft_kv_data_ptr_count=(
+                int(msg[19].decode("ascii")) if len(msg) > 19 and msg[19] != b"" else 0
             ),
         )
 
@@ -864,26 +878,100 @@ class MooncakeKVManager(CommonKVManager):
         dst_device_kv_indices: Optional[npt.NDArray[np.int32]] = None,
         dst_kv_item_len: Optional[int] = None,
         dst_attn_tp_size: Optional[int] = None,
+        dst_draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
+        dst_target_kv_data_ptr_count: int = 0,
+        dst_draft_kv_data_ptr_count: int = 0,
+        prefill_draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         self._validate_envelope_kv_layout(
             dst_kv_ptrs, dst_kv_item_len, dst_attn_tp_size
         )
+        src_target_ptr_count = getattr(
+            self.kv_args, "target_kv_data_ptr_count", len(self.kv_args.kv_data_ptrs)
+        )
+        if dst_draft_kv_indices is None:
+            src_draft_ptr_count = getattr(self.kv_args, "draft_kv_data_ptr_count", 0)
+            if src_draft_ptr_count > 0 and dst_draft_kv_data_ptr_count > 0:
+                raise RuntimeError(
+                    "Draft KV destination metadata is missing despite registered "
+                    "draft buffers on both endpoints"
+                )
+            src_target_ptr_count = len(self.kv_args.kv_data_ptrs)
+        else:
+            src_draft_ptr_count = getattr(self.kv_args, "draft_kv_data_ptr_count", 0)
+            if src_target_ptr_count <= 0 or src_draft_ptr_count <= 0:
+                raise RuntimeError(
+                    "Prefill KV registration is missing target/draft pointer groups"
+                )
+            if (
+                src_target_ptr_count + src_draft_ptr_count
+                != len(self.kv_args.kv_data_ptrs)
+            ):
+                raise RuntimeError(
+                    "Prefill target/draft KV pointer groups do not cover all pointers"
+                )
+            if dst_target_kv_data_ptr_count <= 0 or dst_draft_kv_data_ptr_count <= 0:
+                raise RuntimeError(
+                    "Decode KV registration is missing target/draft pointer groups"
+                )
+            if (
+                dst_target_kv_data_ptr_count + dst_draft_kv_data_ptr_count
+                != len(dst_kv_ptrs)
+            ):
+                raise RuntimeError(
+                    "Decode target/draft KV pointer groups do not cover all pointers"
+                )
+            counts_match = (
+                src_target_ptr_count == dst_target_kv_data_ptr_count
+                and src_draft_ptr_count == dst_draft_kv_data_ptr_count
+            )
+            layer_split_owner = (
+                src_target_ptr_count < dst_target_kv_data_ptr_count
+                and src_draft_ptr_count == dst_draft_kv_data_ptr_count
+            )
+            if not counts_match and not layer_split_owner:
+                raise RuntimeError(
+                    "PD target/draft KV pointer count mismatch: prefill="
+                    f"{src_target_ptr_count}/{src_draft_ptr_count}, decode="
+                    f"{dst_target_kv_data_ptr_count}/{dst_draft_kv_data_ptr_count}"
+                )
+            if len(prefill_kv_indices) != len(dst_kv_indices):
+                raise RuntimeError(
+                    "Target KV source/destination index length mismatch: "
+                    f"{len(prefill_kv_indices)} != {len(dst_kv_indices)}"
+                )
+            if prefill_draft_kv_indices is None:
+                raise RuntimeError("Draft KV transfer is missing prefill source indices")
+            if len(prefill_draft_kv_indices) != len(dst_draft_kv_indices):
+                raise RuntimeError(
+                    "Draft KV source/destination index length mismatch: "
+                    f"{len(prefill_draft_kv_indices)} != {len(dst_draft_kv_indices)}"
+                )
+
+        if dst_target_kv_data_ptr_count:
+            assert dst_target_kv_data_ptr_count <= len(dst_kv_ptrs)
+        else:
+            dst_target_kv_data_ptr_count = len(dst_kv_ptrs)
+
+        src_target_ptrs = self.kv_args.kv_data_ptrs[:src_target_ptr_count]
+        src_target_item_lens = self.kv_args.kv_item_lens[:src_target_ptr_count]
+        dst_target_ptrs = dst_kv_ptrs[:dst_target_kv_data_ptr_count]
         dst_device_kv_ptrs = None
         if dst_device_kv_indices is not None:
             compression_ratios = self.kv_args.mla_compression_ratios
             assert compression_ratios is not None
-            if len(dst_kv_ptrs) == len(self.kv_args.kv_data_ptrs):
+            if len(dst_target_ptrs) == len(src_target_ptrs):
                 start = self.kv_args.prefill_start_layer
                 end = self.kv_args.prefill_end_layer
                 assert end is not None
                 compression_ratios = compression_ratios[start:end]
             c4_layer_num = sum(ratio == 4 for ratio in compression_ratios)
-            dst_device_kv_ptrs = set(dst_kv_ptrs[c4_layer_num:])
-        return self._send_kvcache_generic(
+            dst_device_kv_ptrs = set(dst_target_ptrs[c4_layer_num:])
+        target_ret = self._send_kvcache_generic(
             mooncake_session_id=mooncake_session_id,
-            src_data_ptrs=self.kv_args.kv_data_ptrs,
-            dst_data_ptrs=dst_kv_ptrs,
-            item_lens=self.kv_args.kv_item_lens,
+            src_data_ptrs=src_target_ptrs,
+            dst_data_ptrs=dst_target_ptrs,
+            item_lens=src_target_item_lens,
             prefill_data_indices=prefill_kv_indices,
             dst_data_indices=dst_kv_indices,
             executor=executor,
@@ -892,6 +980,32 @@ class MooncakeKVManager(CommonKVManager):
             dst_device_data_indices=dst_device_kv_indices,
             dst_device_data_ptrs=dst_device_kv_ptrs,
         )
+
+        if dst_draft_kv_indices is None:
+            return target_ret
+        if dst_draft_kv_data_ptr_count <= 0:
+            raise RuntimeError(
+                "Draft KV indices were registered without draft KV pointers"
+            )
+        draft_ret = self._send_kvcache_generic(
+            mooncake_session_id=mooncake_session_id,
+            src_data_ptrs=self.kv_args.kv_data_ptrs[
+                src_target_ptr_count : src_target_ptr_count
+                + src_draft_ptr_count
+            ],
+            dst_data_ptrs=dst_kv_ptrs[
+                dst_target_kv_data_ptr_count : dst_target_kv_data_ptr_count
+                + dst_draft_kv_data_ptr_count
+            ],
+            item_lens=self.kv_args.kv_item_lens[
+                src_target_ptr_count : src_target_ptr_count
+                + src_draft_ptr_count
+            ],
+            prefill_data_indices=prefill_draft_kv_indices,
+            dst_data_indices=dst_draft_kv_indices,
+            executor=executor,
+        )
+        return target_ret if target_ret != 0 else draft_ret
 
     def send_kvcache_dcp(
         self,
@@ -1259,7 +1373,7 @@ class MooncakeKVManager(CommonKVManager):
 
     def _requires_exact_state_index_match(self, st: StateType) -> bool:
         """State types whose page lists are positional and must not be truncated."""
-        return st in (StateType.SWA_RING, StateType.C128_STATE)
+        return st in (StateType.DSA, StateType.SWA_RING, StateType.C128_STATE)
 
     def maybe_send_extra(
         self,
@@ -1703,10 +1817,72 @@ class MooncakeKVManager(CommonKVManager):
                         target_rank_registration_info: KVArgsRegisterInfo = (
                             self.decode_kv_args_table[req.mooncake_session_id]
                         )
+                        src_target_ptr_count = getattr(
+                            self.kv_args,
+                            "target_kv_data_ptr_count",
+                            len(self.kv_args.kv_data_ptrs),
+                        )
+                        src_draft_ptr_count = getattr(
+                            self.kv_args, "draft_kv_data_ptr_count", 0
+                        )
+                        dst_target_ptr_count = (
+                            target_rank_registration_info.dst_target_kv_data_ptr_count
+                        )
+                        dst_draft_ptr_count = (
+                            target_rank_registration_info.dst_draft_kv_data_ptr_count
+                        )
+                        if req.dst_draft_kv_indices is None:
+                            if src_draft_ptr_count > 0 and dst_draft_ptr_count > 0:
+                                raise RuntimeError(
+                                    "Draft KV destination metadata is missing "
+                                    "despite registered draft buffers on both "
+                                    "endpoints"
+                                )
+                            # Dense MTP keeps the legacy appended-pointer path.
+                            # The target/draft grouping is opt-in via draft indices.
+                            src_target_ptr_count = len(self.kv_args.kv_data_ptrs)
+                            src_draft_ptr_count = 0
+                            dst_target_ptr_count = len(
+                                target_rank_registration_info.dst_kv_ptrs
+                            )
+                            dst_draft_ptr_count = 0
+                        elif (
+                            src_target_ptr_count + src_draft_ptr_count
+                            != len(self.kv_args.kv_data_ptrs)
+                            or dst_target_ptr_count + dst_draft_ptr_count
+                            != len(target_rank_registration_info.dst_kv_ptrs)
+                            or dst_draft_ptr_count == 0
+                        ):
+                            raise RuntimeError(
+                                "KV pointer groups do not cover the registered buffers"
+                            )
                         is_dcp_transfer = (
                             target_rank_registration_info.requires_dcp_relayout
                         )
+                        if is_dcp_transfer and dst_draft_ptr_count > 0:
+                            raise RuntimeError(
+                                "HiSparse target-only draft KV is not supported by "
+                                "PD DCP relayout"
+                            )
+                        if dst_draft_ptr_count > 0 and (
+                            not (
+                                self.is_mla_backend
+                                or self.is_hybrid_mla_backend
+                                or self.attn_tp_size
+                                == target_rank_registration_info.dst_attn_tp_size
+                            )
+                            or self.enable_staging
+                        ):
+                            raise RuntimeError(
+                                "HiSparse target-only draft KV requires the direct "
+                                "same-attention-TP Mooncake path"
+                            )
                         chunked_dst_device_kv_indice = None
+                        chunked_dst_draft_kv_indice = None
+                        source_owns_draft = (
+                            req.dst_draft_kv_indices is not None
+                            and src_draft_ptr_count > 0
+                        )
                         if is_dcp_transfer:
                             if req.dst_device_kv_indices is not None:
                                 raise RuntimeError(
@@ -1722,9 +1898,30 @@ class MooncakeKVManager(CommonKVManager):
                                 chunked_dst_device_kv_indice = (
                                     req.dst_device_kv_indices[kv_chunk.index_slice]
                                 )
+                            if req.dst_draft_kv_indices is not None:
+                                if (
+                                    kv_chunk.prefill_draft_kv_indices is None
+                                    and source_owns_draft
+                                ):
+                                    raise RuntimeError(
+                                        "Draft destination indices arrived without "
+                                        "prefill draft source indices"
+                                    )
+                                if source_owns_draft:
+                                    chunked_dst_draft_kv_indice = (
+                                        req.dst_draft_kv_indices[kv_chunk.index_slice]
+                                    )
 
                             # NOTE: This is temporarily a workaround to deal with the case where the prefill_kv_indices
                             # is mismatched with the dst_kv_indices when page size > 1, this should never happen.
+                            if source_owns_draft and len(chunked_dst_kv_indice) != len(
+                                kv_chunk.prefill_kv_indices
+                            ):
+                                raise RuntimeError(
+                                    "Target KV chunk index length mismatch: "
+                                    f"prefill={len(kv_chunk.prefill_kv_indices)}, "
+                                    f"decode={len(chunked_dst_kv_indice)}"
+                                )
                             if len(chunked_dst_kv_indice) < len(
                                 kv_chunk.prefill_kv_indices
                             ):
@@ -1739,6 +1936,20 @@ class MooncakeKVManager(CommonKVManager):
                             if chunked_dst_device_kv_indice is not None:
                                 chunked_dst_device_kv_indice = (
                                     chunked_dst_device_kv_indice[
+                                        : len(kv_chunk.prefill_kv_indices)
+                                    ]
+                                )
+                            if chunked_dst_draft_kv_indice is not None:
+                                if len(chunked_dst_draft_kv_indice) != len(
+                                    kv_chunk.prefill_draft_kv_indices
+                                ):
+                                    raise RuntimeError(
+                                        "Draft KV chunk index length mismatch: "
+                                        f"prefill={len(kv_chunk.prefill_draft_kv_indices)}, "
+                                        f"decode={len(chunked_dst_draft_kv_indice)}"
+                                    )
+                                chunked_dst_draft_kv_indice = (
+                                    chunked_dst_draft_kv_indice[
                                         : len(kv_chunk.prefill_kv_indices)
                                     ]
                                 )
@@ -1789,6 +2000,16 @@ class MooncakeKVManager(CommonKVManager):
                                 dst_device_kv_indices=chunked_dst_device_kv_indice,
                                 dst_kv_item_len=target_rank_registration_info.dst_kv_item_len,
                                 dst_attn_tp_size=target_rank_registration_info.dst_attn_tp_size,
+                                dst_draft_kv_indices=chunked_dst_draft_kv_indice,
+                                dst_target_kv_data_ptr_count=(
+                                    target_rank_registration_info.dst_target_kv_data_ptr_count
+                                ),
+                                dst_draft_kv_data_ptr_count=(
+                                    target_rank_registration_info.dst_draft_kv_data_ptr_count
+                                ),
+                                prefill_draft_kv_indices=(
+                                    kv_chunk.prefill_draft_kv_indices
+                                ),
                             )
                         elif (
                             self.enable_staging
@@ -2146,6 +2367,7 @@ class MooncakeKVManager(CommonKVManager):
         aux_index: Optional[int] = None,
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
+        prefill_draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
         trace_ctx: Optional[Union[TraceReqContext, TraceNullContext]] = None,
     ):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
@@ -2184,6 +2406,7 @@ class MooncakeKVManager(CommonKVManager):
                 is_last_chunk=is_last_chunk,
                 prefill_aux_index=aux_index,
                 state_indices=state_indices,
+                prefill_draft_kv_indices=prefill_draft_kv_indices,
                 num_kv_tokens=num_kv_tokens,
                 trace_ctx=trace_ctx,
             )
@@ -2266,12 +2489,20 @@ class MooncakeKVSender(CommonKVSender):
         kv_indices: npt.NDArray[np.int32],
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
+        chunk_start = self.curr_idx
         kv_indices, index_slice, is_last_chunk, should_skip = (
             self._prepare_send_indices(kv_indices, state_indices)
         )
         if should_skip:
             return
+        if draft_kv_indices is not None:
+            relative_start = index_slice.start - chunk_start
+            relative_end = index_slice.stop - chunk_start
+            draft_kv_indices = np.asarray(
+                draft_kv_indices[relative_start:relative_end], dtype=np.int32
+            )
 
         if not is_last_chunk:
             self.kv_mgr.add_transfer_request(
@@ -2280,6 +2511,7 @@ class MooncakeKVSender(CommonKVSender):
                 index_slice,
                 False,
                 num_kv_tokens=num_kv_tokens,
+                prefill_draft_kv_indices=draft_kv_indices,
                 trace_ctx=self.trace_ctx.copy_for_thread(),
             )
         else:
@@ -2291,6 +2523,7 @@ class MooncakeKVSender(CommonKVSender):
                 aux_index=self.aux_index,
                 state_indices=state_indices,
                 num_kv_tokens=num_kv_tokens,
+                prefill_draft_kv_indices=draft_kv_indices,
                 trace_ctx=self.trace_ctx.copy_for_thread(),
             )
         self._record_transfer_indices(kv_indices, state_indices)
@@ -2403,6 +2636,12 @@ class MooncakeKVReceiver(CommonKVReceiver):
             dst_kv_item_len = str(kv_item_len).encode("ascii")
             dst_dcp_size = str(self.kv_mgr.dcp_size).encode("ascii")
             dst_dcp_rank = str(self.kv_mgr.dcp_rank).encode("ascii")
+            dst_target_kv_data_ptr_count = str(
+                getattr(self.kv_mgr.kv_args, "target_kv_data_ptr_count", 0)
+            ).encode("ascii")
+            dst_draft_kv_data_ptr_count = str(
+                getattr(self.kv_mgr.kv_args, "draft_kv_data_ptr_count", 0)
+            ).encode("ascii")
             if (
                 self.kv_mgr.enable_staging
                 and self.kv_mgr._staging_ctx.allocator is not None
@@ -2437,6 +2676,8 @@ class MooncakeKVReceiver(CommonKVReceiver):
                             staging_total_size_str,
                             dst_dcp_size,
                             dst_dcp_rank,
+                            dst_target_kv_data_ptr_count,
+                            dst_draft_kv_data_ptr_count,
                         ]
                     )
             except zmq.ZMQError:
@@ -2456,6 +2697,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
         state_indices: Optional[List] = None,
         decode_prefix_len: Optional[int] = None,
         device_kv_indices: Optional[npt.NDArray[np.int32]] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         if self.bootstrap_infos is None:
             self.kv_mgr.record_failure(
@@ -2497,6 +2739,11 @@ class MooncakeKVReceiver(CommonKVReceiver):
                             (
                                 np.asarray(device_kv_indices, dtype=np.int32).tobytes()
                                 if not is_dummy and device_kv_indices is not None
+                                else b""
+                            ),
+                            (
+                                np.asarray(draft_kv_indices, dtype=np.int32).tobytes()
+                                if not is_dummy and draft_kv_indices is not None
                                 else b""
                             ),
                         ]

@@ -99,6 +99,55 @@ def validate_hisparse(server_args: ServerArgs) -> None:
         server_args.disable_radix_cache
     ), "Hierarchical sparse attention currently requires --disable-radix-cache."
 
+    from sglang.srt.arg_groups.overrides import resolved_view
+
+    if server_args.speculative_algorithm is not None:
+        if is_v4_hisparse:
+            raise ValueError(
+                "Target-only HiSparse speculative decoding is implemented for "
+                "generic DSA models, not DeepSeek-V4 pools."
+            )
+        if server_args.speculative_draft_kv_cache_dtype not in (None, "auto"):
+            raise ValueError(
+                "Target-only HiSparse speculative decoding currently requires the "
+                "draft and target KV cache dtypes to match; do not set "
+                "--speculative-draft-kv-cache-dtype."
+            )
+        if server_args.enable_return_indexer_topk:
+            raise ValueError(
+                "Target-only HiSparse speculative decoding does not support "
+                "--enable-return-indexer-topk because the indexer capturer is "
+                "process-global."
+            )
+        if server_args.speculative_eagle_topk not in (None, 1):
+            raise ValueError(
+                "Target-only HiSparse speculative decoding currently supports "
+                "chain MTP only (--speculative-eagle-topk=1)."
+            )
+        verify_token_count = server_args.max_speculative_num_draft_tokens or 1
+        if verify_token_count >= server_args.page_size:
+            raise ValueError(
+                "Target-only HiSparse speculative decoding has insufficient "
+                f"verify scratch slots: verify tokens={verify_token_count}, "
+                f"page size={server_args.page_size}."
+            )
+        if (
+            resolved_view(server_args).attn_cp_size > 1
+            or server_args.enable_dsa_cache_layer_split
+        ):
+            raise ValueError(
+                "Target-only HiSparse speculative decoding requires attention "
+                "CP size 1 and disabled DSA cache layer split."
+            )
+        if (
+            server_args.disaggregation_mode == "decode"
+            and server_args.disaggregation_transfer_backend != "mooncake"
+        ):
+            raise ValueError(
+                "HiSparse target with a dense MTP draft pool currently requires "
+                "--disaggregation-transfer-backend=mooncake in decode mode."
+            )
+
     # DSv4 hisparse handles its own dtype/backend pairing elsewhere; the dtype-
     # aware checks below only apply to the DSA hisparse path.
     if is_hip and is_v4_hisparse:
@@ -119,8 +168,6 @@ def validate_hisparse(server_args: ServerArgs) -> None:
                 "--enable-hisparse."
             )
         return
-
-    from sglang.srt.arg_groups.overrides import resolved_view
 
     if resolved_view(server_args).kv_cache_dtype not in (
         "bfloat16",

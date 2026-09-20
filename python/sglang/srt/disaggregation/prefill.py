@@ -218,6 +218,8 @@ class PrefillBootstrapQueue:
         kv_data_ptrs, kv_data_lens, kv_item_lens = (
             self.token_to_kv_pool.get_contiguous_buf_infos()
         )
+        kv_args.target_kv_data_ptr_count = len(kv_data_ptrs)
+        kv_args.draft_kv_data_ptr_count = 0
         kv_args.prefill_end_layer = (
             kv_args.prefill_start_layer + len(kv_data_ptrs)
             if layer_shard_enabled
@@ -233,6 +235,7 @@ class PrefillBootstrapQueue:
             kv_data_ptrs += draft_kv_data_ptrs
             kv_data_lens += draft_kv_data_lens
             kv_item_lens += draft_kv_item_lens
+            kv_args.draft_kv_data_ptr_count = len(draft_kv_data_ptrs)
 
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
@@ -1300,16 +1303,32 @@ class SchedulerDisaggregationPrefillMixin:
 
         for seg_start, seg_end in segments:
             is_final_segment = seg_end == end_idx
-            kv_indices = self.req_to_token_pool.req_to_token[
+            logical_kv_indices = self.req_to_token_pool.req_to_token[
                 req.req_pool_idx, seg_start:seg_end
             ]
-            # Unified memory: req_to_token holds VIRTUAL ids; the transfer needs
-            # physical ones. Per segment, since each is its own gather.
-            kv_indices = (
-                self.token_to_kv_pool_allocator.translate_kv_indices_for_transfer(
-                    kv_indices
+            draft_page_indices = None
+            if self.draft_token_to_kv_pool is not None:
+                # Draft keeps the shared logical index space. The target pool
+                # writes through its logical-to-physical HiSparse mapping.
+                draft_page_indices = kv_to_page_indices(
+                    logical_kv_indices, page_size
+                ).astype(np.int32)
+                if self.scheduler.enable_hisparse:
+                    kv_indices = token_to_kv_pool.translate_loc_from_full_to_hisparse_device(
+                        logical_kv_indices
+                    )
+                else:
+                    kv_indices = self.token_to_kv_pool_allocator.translate_kv_indices_for_transfer(
+                        logical_kv_indices
+                    )
+            else:
+                # Unified memory: req_to_token holds VIRTUAL ids; the transfer
+                # needs physical ones. Per segment, since each is its own gather.
+                kv_indices = (
+                    self.token_to_kv_pool_allocator.translate_kv_indices_for_transfer(
+                        logical_kv_indices
+                    )
                 )
-            )
             page_indices = kv_to_page_indices(kv_indices, page_size)
             segment_is_last = last_chunk and is_final_segment
             if not req.disagg_kv_sender.should_send_kv_chunk(
@@ -1320,6 +1339,7 @@ class SchedulerDisaggregationPrefillMixin:
                 page_indices,
                 state_indices if segment_is_last else None,
                 num_kv_tokens=seg_end - seg_start,
+                draft_kv_indices=draft_page_indices,
             )
         req.start_send_idx = end_idx
         # A last chunk needs no entry: every `last_chunk=True` call site has
