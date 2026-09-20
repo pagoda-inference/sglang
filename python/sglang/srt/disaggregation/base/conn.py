@@ -40,6 +40,8 @@ class KVArgs:
     kv_data_ptrs: List[int]
     kv_data_lens: List[int]
     kv_item_lens: List[int]
+    target_kv_data_ptr_count: int
+    is_hisparse: bool
     kv_layer_ids: List[int]
     kv_cache_dtype_str: str
     aux_data_ptrs: List[int]

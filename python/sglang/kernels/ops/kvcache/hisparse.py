@@ -10,6 +10,8 @@ from sglang.kernels.jit.utils import load_jit, make_cpp_args
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
+_HISPARSE_JIT_CACHE_VERSION = 2
+
 
 @functools.cache
 def _jit_sparse_module(
@@ -34,6 +36,7 @@ def _jit_sparse_module(
         skip_io,
     )
     cache_args = make_cpp_args(
+        _HISPARSE_JIT_CACHE_VERSION,
         item_size_bytes,
         block_size,
         num_top_k,

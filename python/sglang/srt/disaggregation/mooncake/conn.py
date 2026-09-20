@@ -145,6 +145,7 @@ class KVArgsRegisterInfo:
     dcp_token_item_lens: Optional[List[int]] = None
     staging_base_ptr: int = 0
     staging_total_size: int = 0
+    dst_is_hisparse: bool = False
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -188,6 +189,11 @@ class KVArgsRegisterInfo:
             ),
             dst_dcp_rank=(
                 int(msg[17].decode("ascii")) if len(msg) > 17 and msg[17] != b"" else 0
+            ),
+            dst_is_hisparse=(
+                bool(int(msg[18].decode("ascii")))
+                if len(msg) > 18 and msg[18] != b""
+                else False
             ),
         )
 
@@ -893,6 +899,32 @@ class MooncakeKVManager(CommonKVManager):
             dst_device_data_ptrs=dst_device_kv_ptrs,
         )
 
+    def send_kvcache_hisparse(
+        self,
+        mooncake_session_id: str,
+        prefill_kv_indices: npt.NDArray[np.int32],
+        dst_kv_ptrs: list[int],
+        dst_kv_indices: npt.NDArray[np.int32],
+        executor: concurrent.futures.ThreadPoolExecutor,
+    ) -> int:
+        """Send target KV only, excluding draft buffers from MTP registration."""
+        item_lens = self.kv_args.kv_item_lens[:target_kv_ptr_count]
+        target_kv_ptr_count = getattr(
+            self.kv_args, "target_kv_data_ptr_count", len(self.kv_args.kv_data_ptrs)
+        )
+        src_data_ptrs = self.kv_args.kv_data_ptrs[:target_kv_ptr_count]
+        item_lens = self.kv_args.kv_item_lens[:target_kv_ptr_count]
+
+        return self._send_kvcache_generic(
+            mooncake_session_id=mooncake_session_id,
+            src_data_ptrs=src_data_ptrs,
+            dst_data_ptrs=dst_kv_ptrs,
+            item_lens=item_lens,
+            prefill_data_indices=prefill_kv_indices,
+            dst_data_indices=dst_kv_indices,
+            executor=executor,
+        )
+
     def send_kvcache_dcp(
         self,
         mooncake_session_id: str,
@@ -1003,6 +1035,8 @@ class MooncakeKVManager(CommonKVManager):
         dst_attn_tp_size: int,
         dst_kv_item_len: int,
         executor: concurrent.futures.ThreadPoolExecutor,
+        src_kv_data_ptrs: Optional[List[int]] = None,
+        src_kv_item_lens: Optional[List[int]] = None,
     ):
         """
         Sends KV cache slices from this Prefill rank to a target Decode rank,
@@ -1014,7 +1048,9 @@ class MooncakeKVManager(CommonKVManager):
         """
         # Extract configuration
         local_tp_rank_in_group = self.kv_args.engine_rank % self.attn_tp_size
-        src_kv_item_len = self.kv_args.kv_item_lens[0]
+        src_kv_data_ptrs = src_kv_data_ptrs or self.kv_args.kv_data_ptrs
+        src_kv_item_lens = src_kv_item_lens or self.kv_args.kv_item_lens
+        src_kv_item_len = src_kv_item_lens[0]
         dst_tp_rank_in_group = dst_tp_rank % dst_attn_tp_size
         page_size = self.kv_args.page_size
 
@@ -1056,7 +1092,7 @@ class MooncakeKVManager(CommonKVManager):
             dst_head_start_offset = 0
 
         src_k_ptrs, src_v_ptrs, dst_k_ptrs, dst_v_ptrs, layers_current_pp_stage = (
-            self.get_mha_kv_ptrs_with_pp(self.kv_args.kv_data_ptrs, dst_kv_ptrs)
+            self.get_mha_kv_ptrs_with_pp(src_kv_data_ptrs, dst_kv_ptrs)
         )
 
         # Calculate precise byte offset and length for the sub-slice within the token
@@ -1746,6 +1782,21 @@ class MooncakeKVManager(CommonKVManager):
                         skip_kv, skip_state = self._get_dsa_cache_transfer_skip_flags(
                             target_rank_registration_info
                         )
+                        hisparse_src_kwargs = {}
+                        if target_rank_registration_info.dst_is_hisparse:
+                            target_kv_ptr_count = getattr(
+                                self.kv_args,
+                                "target_kv_data_ptr_count",
+                                len(self.kv_args.kv_data_ptrs),
+                            )
+                            hisparse_src_kwargs = {
+                                "src_kv_data_ptrs": self.kv_args.kv_data_ptrs[
+                                    :target_kv_ptr_count
+                                ],
+                                "src_kv_item_lens": self.kv_args.kv_item_lens[
+                                    :target_kv_ptr_count
+                                ],
+                            }
                         if (
                             len(kv_chunk.prefill_kv_indices) == 0
                             or not self.kv_args.kv_data_ptrs
@@ -1772,6 +1823,22 @@ class MooncakeKVManager(CommonKVManager):
                                 dst_layer_ids=(
                                     target_rank_registration_info.dst_kv_layer_ids
                                 ),
+                            )
+                        elif (
+                            target_rank_registration_info.dst_is_hisparse
+                            and (
+                                self.is_mla_backend
+                                or self.is_hybrid_mla_backend
+                                or self.attn_tp_size
+                                == target_rank_registration_info.dst_attn_tp_size
+                            )
+                        ):
+                            ret = self.send_kvcache_hisparse(
+                                req.mooncake_session_id,
+                                kv_chunk.prefill_kv_indices,
+                                target_rank_registration_info.dst_kv_ptrs,
+                                chunked_dst_kv_indice,
+                                executor,
                             )
                         elif (
                             self.is_mla_backend
@@ -1822,6 +1889,7 @@ class MooncakeKVManager(CommonKVManager):
                                 target_rank_registration_info.dst_attn_tp_size,
                                 target_rank_registration_info.dst_kv_item_len,
                                 executor,
+                                **hisparse_src_kwargs,
                             )
                         if ret != 0:
                             with self.session_lock:
@@ -2403,6 +2471,11 @@ class MooncakeKVReceiver(CommonKVReceiver):
             dst_kv_item_len = str(kv_item_len).encode("ascii")
             dst_dcp_size = str(self.kv_mgr.dcp_size).encode("ascii")
             dst_dcp_rank = str(self.kv_mgr.dcp_rank).encode("ascii")
+            dst_is_hisparse = (
+                "1"
+                if getattr(self.kv_mgr.kv_args, "is_hisparse", False)
+                else "0"
+            ).encode("ascii")
             if (
                 self.kv_mgr.enable_staging
                 and self.kv_mgr._staging_ctx.allocator is not None
@@ -2437,6 +2510,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                             staging_total_size_str,
                             dst_dcp_size,
                             dst_dcp_rank,
+                            dst_is_hisparse,
                         ]
                     )
             except zmq.ZMQError:

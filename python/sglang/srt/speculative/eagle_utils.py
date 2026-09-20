@@ -533,6 +533,22 @@ def eagle_prepare_for_verify(
             batch, verify_input.draft_token_num
         )
 
+        hisparse_coordinator = batch.hisparse_coordinator
+        if (
+            hisparse_coordinator is not None
+            and hisparse_coordinator.supports_hisparse_draft_slots()
+        ):
+            hisparse_coordinator.prepare_verify_slots_spec_v2(
+                req_pool_indices=batch.req_pool_indices,
+                verify_cache_locs=batch.out_cache_loc,
+                num_tokens_per_req=verify_input.draft_token_num,
+                start_positions=(
+                    batch.seq_lens_cpu
+                    if batch.seq_lens_cpu is not None
+                    else batch.seq_lens
+                ),
+            )
+
         prepare_mamba_track_for_verify(batch)
 
         # TBO's split_spec_info reads these; no-verify-sync leaves both None.
@@ -560,6 +576,10 @@ def eagle_prepare_for_verify(
     # Run attention backend plan and cuda graph preparation
     can_run_cuda_graph = bool(
         target_worker.model_runner.decode_cuda_graph_runner
+        and not (
+            batch.hisparse_coordinator is not None
+            and batch.hisparse_coordinator.supports_hisparse_draft_slots()
+        )
         and target_worker.model_runner.decode_cuda_graph_runner.can_run_graph(
             verify_forward_batch
         )

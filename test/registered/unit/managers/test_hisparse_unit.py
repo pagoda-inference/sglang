@@ -180,6 +180,7 @@ class TestHiSparseUnit(unittest.TestCase):
         self.coordinator.lru_slots[:] = self.coordinator._lru_init.view(1, 1, -1)
         self.coordinator.ack_staging_queue.clear()
         self.coordinator._has_pending_backup = False
+        self.coordinator._pending_draft_extend_backup = None
         for i in range(len(self.coordinator._skip_first_backup)):
             self.coordinator._skip_first_backup[i] = False
 
@@ -847,6 +848,103 @@ class TestHiSparseUnit(unittest.TestCase):
             self._cleanup_req(req, kv_locs[i], logical_only=is_long)
 
         self._assert_sizes_restored(initial, "batch_multiple")
+
+    # ==================================================================
+    # Test: HiSparse speculative verify slots
+    # ==================================================================
+    def test_speculative_verify_accept_and_backup(self):
+        """Accepted MTP slots persist; rejected slots clear without leaks."""
+        initial = self._get_initial_sizes()
+        fill_len = DEVICE_BUFFER_SIZE
+        draft_num = 4
+        req = _make_req("spec-verify", list(range(fill_len)))
+        self._alloc_req_slot(req)
+
+        kv_loc = self._alloc_kv(req, fill_len)
+        self.coordinator.alloc_device_buffer(req)
+
+        device = self.allocator.device
+        prefix_lens = torch.tensor([fill_len], dtype=torch.int64, device=device)
+        prefix_lens_cpu = torch.tensor([fill_len], dtype=torch.int64)
+        seq_lens = torch.tensor(
+            [fill_len + draft_num], dtype=torch.int64, device=device
+        )
+        seq_lens_cpu = torch.tensor([fill_len + draft_num], dtype=torch.int64)
+        reserved_loc = self.allocator.logical_attn_allocator.alloc_extend(
+            prefix_lens,
+            prefix_lens_cpu,
+            seq_lens,
+            seq_lens_cpu,
+            kv_loc[-1:].to(device=device),
+            draft_num,
+        )
+        self.assertIsNotNone(reserved_loc, "speculative logical reserve failed")
+        verify_cache_locs = reserved_loc[:draft_num]
+        self.req_to_token_pool.write(
+            (req.req_pool_idx, slice(fill_len, fill_len + draft_num)),
+            verify_cache_locs,
+        )
+        req.kv.kv_allocated_len = fill_len + int(reserved_loc.numel())
+        req.kv_committed_len = fill_len
+
+        req_pool_indices = torch.tensor(
+            [req.req_pool_idx], dtype=torch.int64, device=device
+        )
+        self.coordinator.prepare_verify_slots_spec_v2(
+            req_pool_indices=req_pool_indices,
+            verify_cache_locs=verify_cache_locs,
+            num_tokens_per_req=draft_num,
+            start_positions=torch.tensor([fill_len], dtype=torch.int64),
+        )
+
+        mapping = self.allocator.full_to_hisparse_device_index_mapping
+        device_slots = mapping[verify_cache_locs]
+        self.assertTrue(torch.all(device_slots > 0))
+        for layer_id in range(LAYER_NUM):
+            for token_index in range(draft_num):
+                self.device_pool.kv_buffer[layer_id][
+                    device_slots[token_index].long()
+                ] = self._kv_pattern(layer_id, fill_len + token_index)
+
+        accept_index = torch.tensor([[0, 1, -1, -1]], dtype=torch.int32, device=device)
+        self.coordinator.finalize_accepted_tokens_spec_v2(
+            req_pool_indices=req_pool_indices,
+            seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
+            verify_cache_locs=verify_cache_locs,
+            accept_index=accept_index,
+        )
+
+        newest_slot = self.coordinator.req_to_device_buffer[
+            req.req_pool_idx, DEVICE_BUFFER_SIZE
+        ]
+        self.assertEqual(
+            int(mapping[verify_cache_locs[0]].item()),
+            int(device_slots[0].item()),
+        )
+        self.assertEqual(
+            int(mapping[verify_cache_locs[1]].item()), int(newest_slot.item())
+        )
+        self.assertTrue(torch.all(mapping[verify_cache_locs[2:]] == 0))
+        self.assertTrue(
+            torch.all(
+                self.coordinator.req_to_host_pool[
+                    req.req_pool_idx, fill_len : fill_len + 2
+                ]
+                >= 0
+            )
+        )
+
+        self.coordinator.finish_pending_draft_extend_backup()
+        self.assertEqual(int(mapping[verify_cache_locs[0]].item()), 0)
+        self.assertEqual(
+            int(mapping[verify_cache_locs[1]].item()), int(newest_slot.item())
+        )
+
+        self.coordinator.request_finished(req)
+        self.allocator.free(kv_loc)
+        self.allocator.logical_attn_allocator.free(reserved_loc)
+        self._free_req_slot(req)
+        self._assert_sizes_restored(initial, "speculative_verify")
 
 
 if __name__ == "__main__":

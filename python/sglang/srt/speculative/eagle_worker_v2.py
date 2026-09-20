@@ -916,6 +916,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         next_token_ids = batch_result.next_token_ids.to(torch.int64)
 
         # Prepare for draft extend in a separate stream
+        hisparse_coordinator = getattr(batch, "hisparse_coordinator", None)
+        if (
+            hisparse_coordinator is not None
+            and hisparse_coordinator.supports_hisparse_draft_slots()
+            and batch.forward_mode.is_idle()
+        ):
+            hisparse_coordinator.clear_pending_draft_extend_backup()
+
         with self.plan_stream_ctx:
             forward_batch = prepare_for_draft_extend(
                 draft_extend_input,
@@ -965,6 +973,12 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 draft_logits_output = self.draft_runner.forward(
                     forward_batch
                 ).logits_output
+
+        if (
+            hisparse_coordinator is not None
+            and hisparse_coordinator.supports_hisparse_draft_slots()
+        ):
+            hisparse_coordinator.finish_pending_draft_extend_backup()
 
         maybe_detect_nan(
             draft_logits_output.next_token_logits,

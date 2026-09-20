@@ -31,6 +31,41 @@ __device__ __forceinline__ int hash_slot(int32_t key, int hash_size) {
   return ((uint32_t)key * 2654435761u) % (uint32_t)hash_size;
 }
 
+template <int HOT_BUFFER_SIZE, bool IsDsv4Layout>
+__device__ __forceinline__ bool try_get_extra_page_device_loc(
+    int32_t token_idx,
+    int64_t seq_len,
+    const int32_t* __restrict__ req_device_buffer_tokens,
+    const int32_t* __restrict__ req_device_buffer_locs,
+    int64_t page_size,
+    int32_t* __restrict__ out_loc) {
+  int64_t slot = -1;
+  if constexpr (IsDsv4Layout) {
+    if (token_idx == seq_len - 1) {
+      slot = HOT_BUFFER_SIZE;
+    }
+  } else {
+    for (int64_t candidate_slot = HOT_BUFFER_SIZE;
+         candidate_slot < HOT_BUFFER_SIZE + page_size;
+         ++candidate_slot) {
+      if (req_device_buffer_tokens[candidate_slot] == token_idx) {
+        slot = candidate_slot;
+        break;
+      }
+    }
+  }
+
+  if (slot < HOT_BUFFER_SIZE || slot >= HOT_BUFFER_SIZE + page_size) {
+    return false;
+  }
+  const int32_t loc = req_device_buffer_locs[slot];
+  if (loc < 0) {
+    return false;
+  }
+  *out_loc = loc;
+  return true;
+}
+
 #ifdef USE_ROCM
 // 128-bit vector type used by the wide copy path below.
 using TransferVec4 = __attribute__((__vector_size__(4 * sizeof(uint32_t)))) uint32_t;
@@ -400,8 +435,19 @@ __global__ void load_cache_to_device_buffer_kernel(
       int32_t device_loc = -1;
       if (i < count) {
         int32_t token_pos = req_top_k_tokens[i];
-        if (token_pos >= 0) {
+        int32_t extra_loc = -1;
+        if (token_pos >= 0 && token_pos < HOT_BUFFER_SIZE) {
           device_loc = req_device_buffer_locs[token_pos];
+        } else if (
+            token_pos >= 0 &&
+            try_get_extra_page_device_loc<HOT_BUFFER_SIZE, IsDsv4Layout>(
+                token_pos,
+                seq_len,
+                req_device_buffer_tokens,
+                req_device_buffer_locs,
+                page_size,
+                &extra_loc)) {
+          device_loc = extra_loc;
         }
       }
       req_top_k_device_locs[i] = device_loc;
@@ -453,29 +499,36 @@ __global__ void load_cache_to_device_buffer_kernel(
   }
   __syncthreads();
 
-  const int newest_slot = HOT_BUFFER_SIZE;
-  const int32_t newest_token = seq_len - 1;
-
   // Insert top-k tokens into shared-memory hash table.
   for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
     int32_t token_idx = req_top_k_tokens[i];
-    if (token_idx == newest_token) {
-      // If topk includes the latest token, bind its canonical occurrence to newest_slot (at HOT_BUFFER_SIZE) and mark
-      // it as a hit. newest_slot is at the first position of the extra page, excluded from LRU tracking.
+    if (token_idx < 0 || token_idx >= seq_len) {
       s_top_k_tokens[i] = TOKEN_HIT;
-      req_top_k_device_locs[i] = req_device_buffer_locs[newest_slot];
-      s_newest_hit = 1;
+      req_top_k_device_locs[i] = -1;
     } else {
-      int slot = hash_slot(token_idx, HASH_SIZE);
-      while (true) {
-        int32_t old = atomicCAS(&s_hash_keys[slot], HASH_EMPTY, token_idx);
-        if (old == HASH_EMPTY || old == token_idx) {
-          s_hash_vals[slot] = static_cast<int16_t>(i);
-          break;
+      int32_t direct_loc = -1;
+      if (try_get_extra_page_device_loc<HOT_BUFFER_SIZE, IsDsv4Layout>(
+              token_idx,
+              seq_len,
+              req_device_buffer_tokens,
+              req_device_buffer_locs,
+              page_size,
+              &direct_loc)) {
+        s_top_k_tokens[i] = TOKEN_HIT;
+        req_top_k_device_locs[i] = direct_loc;
+        atomicAdd(&s_newest_hit, 1);
+      } else {
+        int slot = hash_slot(token_idx, HASH_SIZE);
+        while (true) {
+          int32_t old = atomicCAS(&s_hash_keys[slot], HASH_EMPTY, token_idx);
+          if (old == HASH_EMPTY || old == token_idx) {
+            s_hash_vals[slot] = static_cast<int16_t>(i);
+            break;
+          }
+          slot = (slot + 1) % HASH_SIZE;
         }
-        slot = (slot + 1) % HASH_SIZE;
+        s_top_k_tokens[i] = token_idx;
       }
-      s_top_k_tokens[i] = token_idx;
     }
   }
   __syncthreads();
