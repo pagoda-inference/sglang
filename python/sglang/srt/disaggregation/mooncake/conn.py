@@ -908,7 +908,6 @@ class MooncakeKVManager(CommonKVManager):
         executor: concurrent.futures.ThreadPoolExecutor,
     ) -> int:
         """Send target KV only, excluding draft buffers from MTP registration."""
-        item_lens = self.kv_args.kv_item_lens[:target_kv_ptr_count]
         target_kv_ptr_count = getattr(
             self.kv_args, "target_kv_data_ptr_count", len(self.kv_args.kv_data_ptrs)
         )
