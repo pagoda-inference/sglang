@@ -1922,7 +1922,11 @@ def release_req(
     # restored later without recompute (see resume_retracted_reqs/load_kv_cache).
     # Callers that will recompute the KV instead (PD true-retraction rebootstrap)
     # pass offload_kv=False to skip the wasteful device->host copy.
-    if server_args.disaggregation_mode == "decode" and offload_kv:
+    if (
+        server_args.disaggregation_mode == "decode"
+        and offload_kv
+        and hisparse_coordinator is None
+    ):
         retraction_backup(
             req,
             tree_cache,

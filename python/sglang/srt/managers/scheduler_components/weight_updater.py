@@ -222,7 +222,10 @@ class SchedulerWeightUpdaterManager:
                     ):
                         queue = getattr(scheduler, queue_name, None)
                         if queue is not None:
-                            queue.release_memory_occupation()
+                            if callable(getattr(queue, 'abort_all', None)):
+                                queue.abort_all()
+                            else:
+                                queue.release_memory_occupation()
                 elif scheduler.disaggregation_mode == DisaggregationMode.PREFILL:
                     queue = getattr(scheduler, "disagg_prefill_bootstrap_queue", None)
                     if queue is not None:

@@ -657,7 +657,34 @@ def alloc_for_spec_decode(
     batch: Optional[ScheduleBatch] = None,
 ) -> None:
     if num_needed_tokens > 0:
-        if tree_cache.token_to_kv_pool_allocator.page_size == 1:
+        allocator = tree_cache.token_to_kv_pool_allocator
+        from sglang.srt.mem_cache.allocator.hisparse import (
+            HiSparseTokenToKVPoolAllocator,
+        )
+
+        if isinstance(allocator, HiSparseTokenToKVPoolAllocator):
+            evict_from_tree_cache(
+                tree_cache,
+                num_needed_tokens + len(reqs) * allocator.page_size,
+            )
+            last_loc = get_last_loc(
+                req_to_token_pool.req_to_token, req_pool_indices, cur_kv_lens
+            )
+            out_cache_loc = allocator.alloc_logical_only(
+                prefix_lens=cur_kv_lens,
+                prefix_lens_cpu=cur_kv_lens_cpu,
+                seq_lens=nxt_kv_lens,
+                seq_lens_cpu=nxt_kv_lens_cpu,
+                last_loc=last_loc,
+                extend_num_tokens=num_needed_tokens,
+            )
+            if out_cache_loc is None:
+                raise RuntimeError(
+                    "Failed to allocate logical KV slots for target-only HiSparse "
+                    f"speculative decoding (needed={num_needed_tokens}, available="
+                    f"{allocator.available_size()})"
+                )
+        elif allocator.page_size == 1:
             out_cache_loc = alloc_token_slots(tree_cache, num_needed_tokens)
         else:
             last_loc = get_last_loc(

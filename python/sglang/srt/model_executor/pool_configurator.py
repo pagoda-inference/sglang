@@ -165,6 +165,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             num_layers = kvc.layer_info.num_effective_layers
 
         self._cell_size = self._compute_cell_size(kvc, num_layers)
+        self._dense_draft_kv_size = 0
         self.use_hisparse_memory_config = (
             get_memory().enable_hisparse
             and kvc.use_mla_backend
@@ -233,6 +234,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                         num_layers=draft_num_layers,
                         allocate_all_layers=True,
                     )
+                    self._dense_draft_kv_size = draft_kv_size + draft_indexer_size
                     self._cell_size += draft_kv_size + draft_indexer_size
                 else:
                     self._cell_size = int(
@@ -466,7 +468,9 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     f"available_bytes={available_bytes}"
                 )
 
-            gpu_limited_tokens = remaining_gpu_bytes // self._indexer_kv_base_size
+            gpu_limited_tokens = remaining_gpu_bytes // (
+                self._indexer_kv_base_size + self._dense_draft_kv_size
+            )
             cpu_limited_tokens = (
                 available_bytes * host_to_device_ratio
             ) // self._main_kv_size
@@ -483,12 +487,13 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             logger.info(
                 "HiSparse memory config: logical_tokens=%d, device_hot_tokens=%d, "
                 "host_to_device_ratio=%s, main_kv_bytes_per_token=%d, "
-                "indexer_bytes_per_token=%d",
+                "indexer_bytes_per_token=%d, draft_dense_bytes_per_token=%d",
                 max_total_num_tokens,
                 hot_tokens,
                 host_to_device_ratio,
                 self._main_kv_size,
                 self._indexer_kv_base_size,
+                self._dense_draft_kv_size,
             )
             return MemoryPoolConfig(
                 max_total_num_tokens=max_total_num_tokens,

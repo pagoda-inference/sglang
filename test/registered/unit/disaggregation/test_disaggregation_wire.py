@@ -18,12 +18,17 @@ from sglang.srt.disaggregation.common.utils import (
     unpack_int_lists,
     unpack_list_of_buffers,
 )
+from sglang.srt.disaggregation.decode import (
+    DecodePreallocQueue,
+    DecodeTransferQueue,
+)
 from sglang.srt.disaggregation.decode_schedule_batch_mixin import (
     ScheduleBatchDisaggregationDecodeMixin,
 )
 from sglang.srt.disaggregation.mooncake.conn import (
     KVArgsRegisterInfo,
     MooncakeKVManager,
+    TransferInfo,
 )
 from sglang.srt.disaggregation.utils import (
     MetadataBuffers,
@@ -72,6 +77,111 @@ class TestDisaggregationWire(unittest.TestCase):
         self.assertEqual(info.staging_total_size, 4096)
         self.assertEqual(info.dst_dcp_size, 4)
         self.assertEqual(info.dst_dcp_rank, 2)
+
+    def test_mooncake_target_draft_wire_fields(self):
+        registration = [
+            b"room",
+            b"127.0.0.1",
+            b"1234",
+            b"session",
+            struct.pack("Q", 0x1000),
+            struct.pack("Q", 0x2000),
+            b"",
+            b"0",
+            b"1",
+            b"128",
+            b"",
+            b"",
+            b"",
+            b"",
+            struct.pack("Q", 0),
+            b"0",
+            b"1",
+            b"0",
+            b"18",
+            b"2",
+            b"3",
+        ]
+        info = KVArgsRegisterInfo.from_zmq(registration)
+        self.assertEqual(info.dst_target_kv_data_ptr_count, 18)
+        self.assertEqual(info.dst_draft_kv_data_ptr_count, 2)
+
+        metadata = [
+            b"1",
+            b"127.0.0.1",
+            b"1234",
+            b"session",
+            np.array([4, 5], dtype=np.int32).tobytes(),
+            b"0",
+            b"",
+            b"1",
+            b"0",
+            b"",
+            np.array([6, 7], dtype=np.int32).tobytes(),
+        ]
+        transfer = TransferInfo.from_zmq(metadata)
+        np.testing.assert_array_equal(transfer.dst_kv_indices, [4, 5])
+        np.testing.assert_array_equal(transfer.dst_draft_kv_indices, [6, 7])
+
+    @staticmethod
+    def _decode_cleanup_entry():
+        receiver = Mock()
+        req = SimpleNamespace(req_pool_idx=7)
+        return SimpleNamespace(
+            req=req,
+            kv_receiver=receiver,
+            metadata_buffer_index=3,
+        )
+
+    def test_decode_prealloc_release_releases_resources(self):
+        queue = DecodePreallocQueue.__new__(DecodePreallocQueue)
+        entry = self._decode_cleanup_entry()
+        queue.queue = [entry]
+        queue.pending_reqs = [entry]
+        queue.scheduler = SimpleNamespace(
+            enable_hisparse=True,
+            hisparse_coordinator=Mock(),
+        )
+        queue.tree_cache = Mock()
+        queue.retracted_queue = []
+        queue.kv_manager = Mock(spec=[])
+
+        with patch('sglang.srt.disaggregation.decode.release_kv_cache') as release:
+            queue.release_memory_occupation()
+
+        entry.kv_receiver.abort.assert_called_once_with()
+        queue.scheduler.hisparse_coordinator.request_finished.assert_called_once_with(
+            entry.req
+        )
+        release.assert_called_once_with(entry.req, queue.tree_cache, is_insert=False)
+        self.assertEqual(queue.queue, [])
+        self.assertEqual(queue.pending_reqs, [])
+
+    def test_decode_transfer_abort_all_releases_resources(self):
+        queue = DecodeTransferQueue.__new__(DecodeTransferQueue)
+        entry = self._decode_cleanup_entry()
+        queue.queue = [entry]
+        queue.enable_staging = False
+        queue.staging_handler = None
+        queue.scheduler = SimpleNamespace(
+            enable_hisparse=True,
+            hisparse_coordinator=Mock(),
+        )
+        queue.tree_cache = Mock()
+        queue.metadata_buffers = SimpleNamespace(bootstrap_room=[0, 0, 0, 99])
+        queue.req_to_metadata_buffer_idx_allocator = Mock()
+
+        with patch('sglang.srt.disaggregation.decode.release_kv_cache') as release:
+            queue.abort_all()
+
+        entry.kv_receiver.abort.assert_called_once_with()
+        queue.scheduler.hisparse_coordinator.request_finished.assert_called_once_with(
+            entry.req
+        )
+        queue.req_to_metadata_buffer_idx_allocator.free.assert_called_once_with(3)
+        release.assert_called_once_with(entry.req, queue.tree_cache, is_insert=False)
+        self.assertEqual(queue.metadata_buffers.bootstrap_room[3], 0)
+        self.assertEqual(queue.queue, [])
 
     def test_int_lists_roundtrip(self):
         cases = [

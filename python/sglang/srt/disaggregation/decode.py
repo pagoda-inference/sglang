@@ -459,6 +459,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             kv_data_lens += device_kv_data_lens[c4_layer_num:]
             kv_item_lens += device_kv_item_lens[c4_layer_num:]
             kv_data_mem_kinds += ["VRAM"] * len(device_kv_data_ptrs[c4_layer_num:])
+        kv_args.target_kv_data_ptr_count = len(kv_data_ptrs)
         if self.draft_token_to_kv_pool is not None:
             # We should also transfer draft model kv cache. The indices are
             # always shared with a target model.
@@ -469,6 +470,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             kv_data_lens += draft_kv_data_lens
             kv_item_lens += draft_kv_item_lens
             kv_data_mem_kinds += ["VRAM"] * len(draft_kv_data_ptrs)
+            kv_args.draft_kv_data_ptr_count = len(draft_kv_data_ptrs)
 
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
@@ -694,7 +696,20 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             self.add(req, is_retracted=is_retracted)
 
     def release_memory_occupation(self):
-        self.queue.clear()
+        for decode_req in self.queue:
+            if decode_req.kv_receiver is not None:
+                decode_req.kv_receiver.abort()
+                decode_req.kv_receiver.clear()
+                decode_req.kv_receiver = None
+            if (
+                self.scheduler.enable_hisparse
+                and decode_req.req.req_pool_idx is not None
+            ):
+                self.scheduler.hisparse_coordinator.request_finished(decode_req.req)
+            if decode_req.req.req_pool_idx is not None:
+                release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+        self.queue = []
+        self.pending_reqs = []
         for req in self.retracted_queue:
             retraction_discard(
                 req,
@@ -1292,6 +1307,26 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             if device_page_indices is not None:
                 metadata_kwargs["device_kv_indices"] = device_page_indices
             if (
+                self.draft_token_to_kv_pool is not None
+                and (
+                    self.scheduler.enable_hisparse
+                    or self.transfer_backend == TransferBackend.MOONCAKE
+                )
+            ):
+                if self.transfer_backend != TransferBackend.MOONCAKE:
+                    raise NotImplementedError(
+                        "HiSparse target with a dense draft pool currently requires "
+                        "the Mooncake transfer backend"
+                    )
+                draft_page_indices = kv_to_page_indices(
+                    self.req_to_token_pool.req_to_token[
+                        decode_req.req.req_pool_idx,
+                        prefix_len:origin_input_len,
+                    ],
+                    page_size,
+                ).astype(np.int32)
+                metadata_kwargs["draft_kv_indices"] = draft_page_indices
+            if (
                 self.transfer_queue.enable_staging
                 and hasattr(decode_req.kv_receiver, "require_staging")
                 and decode_req.kv_receiver.require_staging
@@ -1609,13 +1644,23 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 swa_tail_len=self._swa_tail_len(fill_len),
             )
             # Allocate host indices for the RDMA transfer target.
-            host_indices = coordinator.mem_pool_host.alloc_paged_token_slots(
-                coordinator.req_to_host_pool,
-                coordinator.req_to_host_pool_allocated_len,
-                req.req_pool_idx,
-                0,
-                coordinator.host_token_len(fill_len),
-            )
+            try:
+                host_indices = coordinator.mem_pool_host.alloc_paged_token_slots(
+                    coordinator.req_to_host_pool,
+                    coordinator.req_to_host_pool_allocated_len,
+                    req.req_pool_idx,
+                    0,
+                    coordinator.host_token_len(fill_len),
+                )
+            except Exception:
+                coordinator.request_finished(req)
+                allocator.free(kv_loc)
+                self.req_to_token_pool.free(req)
+                req.kv = None
+                req.kv_committed_len = 0
+                req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+                req.extend_range = None
+                raise
         else:
             uses_swa_tail = self._uses_swa_tail_prealloc() and prefix_len == 0
             swa_tail_len = self._swa_tail_len(fill_len)
@@ -2128,9 +2173,34 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
 
         return transferred_reqs
 
+    def abort_all(self) -> None:
+        for decode_req in self.queue:
+            if decode_req.kv_receiver is not None:
+                decode_req.kv_receiver.abort()
+                decode_req.kv_receiver.clear()
+                decode_req.kv_receiver = None
+            if (
+                self.enable_staging
+                and self.staging_handler is not None
+                and self.staging_handler.is_staging_room(decode_req.req.bootstrap_room)
+            ):
+                self.staging_handler.unregister_decode_req(decode_req.req.bootstrap_room)
+            metadata_buffer_index = decode_req.metadata_buffer_index
+            if metadata_buffer_index != -1:
+                self.metadata_buffers.bootstrap_room[metadata_buffer_index] = 0
+                self.req_to_metadata_buffer_idx_allocator.free(metadata_buffer_index)
+            if (
+                self.scheduler.enable_hisparse
+                and decode_req.req.req_pool_idx is not None
+            ):
+                self.scheduler.hisparse_coordinator.request_finished(decode_req.req)
+            if decode_req.req.req_pool_idx is not None:
+                release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+        self.queue = []
+
     def release_memory_occupation(self):
         """Clean up in-flight transfers before releasing GPU memory."""
-        self.queue.clear()
+        self.abort_all()
 
     def resume_memory_occupation(self):
         """Queues are already cleared on release; new transfers can be accepted."""
