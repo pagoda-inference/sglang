@@ -1315,6 +1315,7 @@ class Scheduler(
             if self.draft_worker is not None
             else None
         )
+        self.draft_token_to_kv_pool = draft_token_to_kv_pool
 
         if self.spec_algorithm.carries_draft_hidden_states():
             # `draft_runner` aliases `draft_runner_list[0]` in the multi-layer

@@ -2,8 +2,10 @@ import unittest
 from types import SimpleNamespace
 
 import numpy as np
+import torch
 
 from sglang.srt.disaggregation.fake.conn import FakeKVReceiver, FakeKVSender
+from sglang.srt.disaggregation.prefill import SchedulerDisaggregationPrefillMixin
 from sglang.srt.disaggregation.mooncake.conn import MooncakeKVManager
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -11,6 +13,44 @@ register_cpu_ci(est_time=2, suite="stage-a-test-cpu")
 
 
 class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
+    def test_prefill_send_kv_chunk_uses_scheduler_draft_pool(self):
+        class Scheduler(SchedulerDisaggregationPrefillMixin):
+            pass
+
+        scheduler = Scheduler()
+        scheduler.token_to_kv_pool_allocator = SimpleNamespace(
+            get_kvcache=lambda: SimpleNamespace(page_size=64),
+            translate_kv_indices_for_transfer=lambda indices: indices,
+        )
+        scheduler.req_to_token_pool = SimpleNamespace(
+            req_to_token=torch.arange(128, dtype=torch.int64).reshape(1, 128)
+        )
+        scheduler.draft_token_to_kv_pool = object()
+        scheduler.enable_hisparse = False
+        scheduler.enable_staging = False
+        scheduler.disagg_prefill_pending_chunk_rids = set()
+        sends = []
+        sender = SimpleNamespace(
+            should_send_kv_chunk=lambda page_count, is_last_chunk: True,
+            send=lambda *args, **kwargs: sends.append((args, kwargs)),
+        )
+        req = SimpleNamespace(
+            req_pool_idx=0,
+            rid="test",
+            start_send_idx=0,
+            origin_input_ids=[0] * 128,
+            extend_range=SimpleNamespace(end=128),
+            disagg_kv_sender=sender,
+        )
+
+        scheduler.send_kv_chunk(req, last_chunk=False, end_idx=128)
+
+        self.assertEqual(req.start_send_idx, 128)
+        self.assertEqual(len(sends), 1)
+        np.testing.assert_array_equal(
+            sends[0][1]["draft_kv_indices"], [0, 1]
+        )
+
     def test_fake_transfer_components_accept_draft_indices(self):
         receiver = FakeKVReceiver.__new__(FakeKVReceiver)
         receiver.has_sent_metadata = False
