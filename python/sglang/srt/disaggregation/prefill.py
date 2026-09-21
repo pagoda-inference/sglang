@@ -1313,7 +1313,7 @@ class SchedulerDisaggregationPrefillMixin:
                 draft_page_indices = kv_to_page_indices(
                     logical_kv_indices, page_size
                 ).astype(np.int32)
-                if self.scheduler.enable_hisparse:
+                if self.enable_hisparse:
                     kv_indices = token_to_kv_pool.translate_loc_from_full_to_hisparse_device(
                         logical_kv_indices
                     )
