@@ -2045,10 +2045,30 @@ class DeepseekSparseAttnBackend(
 
         # todo hisparse: to cover more backends
         if self.hisparse_coordinator is not None:
-            # flash_mla_sparse_fwd / tilelang require int32 page indices.
-            page_table_1 = self.token_to_kv_pool.translate_loc_to_hisparse_device(
-                page_table_1
-            ).to(torch.int32)
+            if forward_batch.forward_mode.is_target_verify():
+                num_reqs = forward_batch.req_pool_indices.shape[0]
+                num_steps = self.speculative_num_draft_tokens
+                if topk_indices is None or topk_indices.shape != (
+                    num_reqs * num_steps,
+                    self.dsa_index_topk,
+                ):
+                    raise ValueError(
+                        "HiSparse TARGET_VERIFY top-k shape mismatch: got "
+                        f"{None if topk_indices is None else tuple(topk_indices.shape)}, "
+                        f"expected {(num_reqs * num_steps, self.dsa_index_topk)}"
+                    )
+                page_table_1 = self.hisparse_coordinator.swap_in_selected_pages(
+                    forward_batch.req_pool_indices,
+                    metadata.dsa_seqlens_expanded,
+                    topk_indices.view(num_reqs, num_steps, -1),
+                    layer.layer_id,
+                    num_steps=num_steps,
+                ).view(num_reqs * num_steps, -1)
+            else:
+                # flash_mla_sparse_fwd / tilelang require int32 page indices.
+                page_table_1 = self.token_to_kv_pool.translate_loc_to_hisparse_device(
+                    page_table_1
+                ).to(torch.int32)
 
         if dsa_impl == "tilelang":
             if q_rope is not None:
@@ -3464,7 +3484,11 @@ class DeepseekSparseAttnBackend(
     ) -> DSAIndexerMetadata:
         force_unfused = not self.use_fused_topk or (
             self.hisparse_coordinator is not None
-            and forward_batch.forward_mode.is_decode_or_idle()
+            and (
+                forward_batch.forward_mode.is_decode_or_idle()
+                or forward_batch.forward_mode.is_target_verify()
+                or forward_batch.forward_mode.is_draft_extend(include_v2=True)
+            )
         )
         return DSAIndexerMetadata(
             attn_metadata=self.forward_metadata,

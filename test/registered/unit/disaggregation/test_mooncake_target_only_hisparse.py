@@ -113,6 +113,39 @@ class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
         np.testing.assert_array_equal(calls[1]["prefill_data_indices"], [4, 5])
         np.testing.assert_array_equal(calls[1]["dst_data_indices"], [20, 21])
 
+    def test_layer_split_target_keeps_layer_metadata_with_draft(self):
+        manager = MooncakeKVManager.__new__(MooncakeKVManager)
+        manager.kv_args = SimpleNamespace(
+            kv_data_ptrs=[100, 200],
+            kv_item_lens=[40, 24],
+            kv_layer_ids=[7],
+            target_kv_data_ptr_count=1,
+            draft_kv_data_ptr_count=1,
+        )
+        calls = []
+        manager._send_kvcache_generic = lambda **kwargs: calls.append(kwargs) or 0
+        manager._validate_envelope_kv_layout = lambda *args, **kwargs: None
+
+        ret = manager.send_kvcache(
+            mooncake_session_id="session",
+            prefill_kv_indices=np.array([2], dtype=np.int32),
+            dst_kv_ptrs=[300, 301, 400, 500],
+            dst_kv_indices=np.array([10], dtype=np.int32),
+            executor=None,
+            dst_layer_ids=[3, 7, 9],
+            dst_draft_kv_indices=np.array([20], dtype=np.int32),
+            dst_target_kv_data_ptr_count=3,
+            dst_draft_kv_data_ptr_count=1,
+            prefill_draft_kv_indices=np.array([4], dtype=np.int32),
+        )
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["src_layer_ids"], [7])
+        self.assertEqual(calls[0]["dst_layer_ids"], [3, 7, 9])
+        self.assertNotIn("src_layer_ids", calls[1])
+        self.assertNotIn("dst_layer_ids", calls[1])
+
     def test_legacy_dense_path_keeps_appended_draft_pointers(self):
         manager = MooncakeKVManager.__new__(MooncakeKVManager)
         manager.kv_args = SimpleNamespace(

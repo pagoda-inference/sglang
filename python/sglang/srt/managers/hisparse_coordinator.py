@@ -750,16 +750,11 @@ class HiSparseCoordinator:
         if torch.any(buffer_columns >= self.padded_buffer_size):
             raise ValueError("HiSparse target verify slots exceed the padded buffer")
 
-        mapping = self.mem_pool_device.full_to_hisparse_device_index_mapping
-        stale_device_locs = mapping[verify_cache_locs]
-        stale_device_locs = torch.unique(stale_device_locs[stale_device_locs > 0])
-        if stale_device_locs.numel() > 0:
-            self.token_to_kv_pool_allocator.free_hisparse_indices(stale_device_locs)
-
         device_slots = self.req_to_device_buffer[row_indices, buffer_columns]
         self.req_device_buffer_tokens[:, row_indices, buffer_columns] = (
             token_positions.to(torch.int32).unsqueeze(0)
         )
+        mapping = self.mem_pool_device.full_to_hisparse_device_index_mapping
         mapping[verify_cache_locs] = device_slots
 
     def _backup_target_verify_locs_to_host(
@@ -1182,6 +1177,7 @@ class HiSparseCoordinator:
         top_k_result: torch.Tensor,
         layer_id: int,
         record_plan: bool = False,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         """Run the full plan+IO swap-in kernel for one layer; return its slot table.
 
@@ -1189,7 +1185,19 @@ class HiSparseCoordinator:
         miss plan into self._miss_{src,dst,count} for the skip layers to replay.
         """
         num_reqs = req_pool_indices.size(0)
-        top_k_indices = self.top_k_device_locs_buffer[:num_reqs]
+        needed_rows = num_reqs * num_steps
+        if needed_rows > self.top_k_device_locs_buffer.shape[0]:
+            self.top_k_device_locs_buffer = torch.full(
+                (needed_rows, self.top_k),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        top_k_indices = self.top_k_device_locs_buffer[:needed_rows]
+        if num_steps > 1:
+            top_k_indices = top_k_indices.view(num_reqs, num_steps, -1)
+        top_k_indices.fill_(-1)
+        record_plan = record_plan and num_steps == 1
 
         swap_in_fn = (
             load_cache_to_device_buffer_dsv4_mla
@@ -1219,10 +1227,11 @@ class HiSparseCoordinator:
             item_size_bytes=self.item_size_bytes,
             num_top_k=self.top_k,
             hot_buffer_size=self.device_buffer_size,
-            page_size=1,
+            page_size=self.mem_pool_device.page_size if num_steps > 1 else 1,
             block_size=self.swap_in_block_size,
             num_real_reqs=self.num_real_reqs,
             skip_io=self.skip_io,
+            num_steps=num_steps,
             **plan,
         )
         return top_k_indices
@@ -1249,12 +1258,21 @@ class HiSparseCoordinator:
         compressed_seq_lens: torch.Tensor,
         top_k_result: torch.Tensor,
         layer_id: int,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         """Swap selected top-k tokens into device memory and return their indices.
 
         With prefetch enabled, anchors swap in synchronously (recording the miss
         plan) and prefetch their skip layers' copies; skip layers just wait.
         """
+        if num_steps > 1:
+            return self._run_swap_in_kernel(
+                req_pool_indices,
+                compressed_seq_lens,
+                top_k_result,
+                layer_id,
+                num_steps=num_steps,
+            )
         if not self.enable_prefetch:
             return self._run_swap_in_kernel(
                 req_pool_indices, compressed_seq_lens, top_k_result, layer_id

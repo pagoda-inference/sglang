@@ -10,6 +10,8 @@ from sglang.kernels.jit.utils import load_jit, make_cpp_args
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
+_HISPARSE_JIT_CACHE_VERSION = 7
+
 
 @functools.cache
 def _jit_sparse_module(
@@ -34,6 +36,7 @@ def _jit_sparse_module(
         skip_io,
     )
     cache_args = make_cpp_args(
+        _HISPARSE_JIT_CACHE_VERSION,
         item_size_bytes,
         block_size,
         num_top_k,
@@ -136,6 +139,7 @@ def _load_cache_to_device_buffer_mla(
     miss_dst: torch.Tensor | None,
     miss_count: torch.Tensor | None,
     skip_io: bool,
+    num_steps: int = 1,
 ) -> None:
     assert (
         hot_buffer_size >= num_top_k
@@ -186,6 +190,7 @@ def _load_cache_to_device_buffer_mla(
         num_real_reqs,
         page_size,
         item_size_bytes,
+        num_steps,
         miss_src,
         miss_dst,
         miss_count,
@@ -213,6 +218,7 @@ def load_cache_to_device_buffer_mla(
     miss_dst: torch.Tensor | None = None,
     miss_count: torch.Tensor | None = None,
     skip_io: bool = False,
+    num_steps: int = 1,
 ) -> None:
     """Generic MLA hisparse swap-in: device + host both linear (stride=item_size_bytes).
 
@@ -241,6 +247,7 @@ def load_cache_to_device_buffer_mla(
         miss_dst=miss_dst,
         miss_count=miss_count,
         skip_io=skip_io,
+        num_steps=num_steps,
     )
 
 
@@ -302,6 +309,7 @@ def load_cache_to_device_buffer_dsv4_mla(
     miss_dst: torch.Tensor | None = None,
     miss_count: torch.Tensor | None = None,
     skip_io: bool = False,
+    num_steps: int = 1,
 ) -> None:
     """DSv4 hisparse swap-in: page-padded device + page-padded host C4 layout."""
     _load_cache_to_device_buffer_mla(
@@ -326,4 +334,5 @@ def load_cache_to_device_buffer_dsv4_mla(
         miss_dst=miss_dst,
         miss_count=miss_count,
         skip_io=skip_io,
+        num_steps=num_steps,
     )

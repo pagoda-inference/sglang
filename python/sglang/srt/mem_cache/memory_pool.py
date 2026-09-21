@@ -4415,6 +4415,17 @@ class DSATokenToKVPool(MLATokenToKVPool):
         self.index_key_cache = self._create_index_key_cache()
         self._finalize_allocation_log(size)
 
+    def get_kv_layer_ids(self):
+        if getattr(self, "layer_shard_enabled", False):
+            owned_start, owned_end = self._owned_local_layer_range()
+            return list(
+                range(
+                    self.start_layer + owned_start,
+                    self.start_layer + owned_end,
+                )
+            )
+        return list(range(self.start_layer, self.start_layer + self.layer_num))
+
     def _create_index_key_cache(self) -> IndexKeyCache:
         return IndexKeyCache(self, self.index_buf_size)
 
