@@ -10,7 +10,7 @@ from sglang.kernels.jit.utils import load_jit, make_cpp_args
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
-_HISPARSE_JIT_CACHE_VERSION = 7
+_HISPARSE_JIT_CACHE_VERSION = 13
 
 
 @functools.cache

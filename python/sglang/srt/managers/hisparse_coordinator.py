@@ -1184,6 +1184,7 @@ class HiSparseCoordinator:
         record_plan (set on the anchor of a shared-index group) also records the
         miss plan into self._miss_{src,dst,count} for the skip layers to replay.
         """
+        self.wait_for_pending_backup()
         num_reqs = req_pool_indices.size(0)
         needed_rows = num_reqs * num_steps
         if needed_rows > self.top_k_device_locs_buffer.shape[0]:

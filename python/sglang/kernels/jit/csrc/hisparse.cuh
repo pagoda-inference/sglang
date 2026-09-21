@@ -246,7 +246,15 @@ __device__ __forceinline__ void copy_miss_item(
     void* __restrict__ device_buffer_v,
     int64_t src_loc,
     int64_t dst_loc,
-    int64_t item_size_bytes) {
+    int64_t item_size_bytes,
+    int64_t host_capacity,
+    int64_t device_capacity) {
+  if (src_loc < 0 || src_loc >= host_capacity) {
+    return;
+  }
+  if (dst_loc < 0 || dst_loc >= device_capacity) {
+    return;
+  }
   static_assert(!IsDsv4Layout || IsMLA, "DSv4 page-padded layout is K-only (MLA).");
   if constexpr (IsDsv4Layout) {
 #ifdef USE_ROCM
@@ -419,7 +427,9 @@ __global__ void load_cache_to_device_buffer_kernel(
     int32_t* __restrict__ miss_dst_out,
     int32_t* __restrict__ miss_count_out,
     int64_t plan_stride,
-    int64_t num_steps) {
+    int64_t num_steps,
+    int64_t host_capacity,
+    int64_t device_capacity) {
   static_assert(!IsDsv4Layout || IsMLA, "DSv4 page-padded layout is K-only (MLA).");
   // todo hisparse: support page wise sparsity
   constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
@@ -546,15 +556,20 @@ __global__ void load_cache_to_device_buffer_kernel(
           req_top_k_device_locs[i] = direct_loc;
         } else {
           int slot = hash_slot(token_idx, HASH_SIZE);
-          while (true) {
+          bool inserted = false;
+          for (int probe = 0; probe < HASH_SIZE && !inserted; ++probe) {
             int32_t old = atomicCAS(&s_hash_keys[slot], HASH_EMPTY, token_idx);
             if (old == HASH_EMPTY || old == token_idx) {
               s_hash_vals[slot] = static_cast<int16_t>(i);
-              break;
+              inserted = true;
+            } else {
+              slot = (slot + 1) % HASH_SIZE;
             }
-            slot = (slot + 1) % HASH_SIZE;
           }
-          s_top_k_tokens[i] = token_idx;
+          s_top_k_tokens[i] = inserted ? token_idx : TOKEN_HIT;
+          if (!inserted) {
+            req_top_k_device_locs[i] = -1;
+          }
         }
       }
     }
@@ -574,7 +589,7 @@ __global__ void load_cache_to_device_buffer_kernel(
       int my_found_top_k_idx = -1;
       if (my_buffer_token >= 0) {
         int h = hash_slot(my_buffer_token, HASH_SIZE);
-        while (true) {
+        for (int probe = 0; probe < HASH_SIZE; ++probe) {
           int32_t k = s_hash_keys[h];
           if (k == my_buffer_token) {
             my_found_top_k_idx = static_cast<int32_t>(s_hash_vals[h]);
@@ -659,6 +674,12 @@ __global__ void load_cache_to_device_buffer_kernel(
         is_miss = s_top_k_tokens[my_token_idx] != TOKEN_HIT;
         if (is_miss) {
           my_token = s_top_k_tokens[my_token_idx];
+          if (my_token < 0 || my_token >= host_stride ||
+              req_host_cache_locs[my_token] < 0) {
+            is_miss = false;
+            s_top_k_tokens[my_token_idx] = TOKEN_HIT;
+            req_top_k_device_locs[my_token_idx] = -1;
+          }
         }
       }
 
@@ -741,7 +762,7 @@ __global__ void load_cache_to_device_buffer_kernel(
         const int64_t src_loc = req_host_cache_locs[miss_token];
         const int64_t dst_loc = static_cast<int64_t>(req_device_buffer_locs[evict_slot]);
         copy_miss_item<IsMLA, IsDsv4Layout>(
-            lane_id, host_cache_k, host_cache_v, device_buffer_k, device_buffer_v, src_loc, dst_loc, item_size_bytes);
+            lane_id, host_cache_k, host_cache_v, device_buffer_k, device_buffer_v, src_loc, dst_loc, item_size_bytes, host_capacity, device_capacity);
       }
     }
 
@@ -796,6 +817,10 @@ void load_cache_to_device_buffer(
   const int64_t lru_slot_stride_0 = lru_slots.strides()[0];
   const int64_t top_k_tokens_stride = top_k_tokens.strides()[0];
   const int64_t top_k_device_locs_stride = top_k_device_locs.strides()[0];
+  const int64_t host_capacity = host_cache_k.shape()[0] *
+      (IsDsv4Layout ? device::hisparse::kPageSize : 1);
+  const int64_t device_capacity = device_buffer_k.shape()[0] *
+      (IsDsv4Layout ? device::hisparse::kPageSize : 1);
   const auto device = LaunchKernel::resolve_device(top_k_tokens.device());
 
   // Generic lambda: int32/int64 kernel variants are compiled for both
@@ -833,7 +858,9 @@ void load_cache_to_device_buffer(
         miss_dst_ptr,
         miss_count_ptr,
         plan_stride,
-        num_steps);
+        num_steps,
+        host_capacity,
+        device_capacity);
   };
 
   const auto seq_dtype = seq_lens.dtype();
@@ -915,7 +942,9 @@ __global__ __launch_bounds__(BLOCK_SIZE, 1) void copy_cache_planned_kernel(
     void* __restrict__ device_buffer_k,
     void* __restrict__ device_buffer_v,
     int64_t plan_stride,
-    int64_t item_size_bytes) {
+    int64_t item_size_bytes,
+    int64_t host_capacity,
+    int64_t device_capacity) {
   constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
   const int lane_id = threadIdx.x % WARP_SIZE;
   const int warp_global = blockIdx.x * NUM_WARPS + threadIdx.x / WARP_SIZE;
@@ -950,7 +979,9 @@ __global__ __launch_bounds__(BLOCK_SIZE, 1) void copy_cache_planned_kernel(
             device_buffer_v,
             src_row[m],
             static_cast<int64_t>(dst_row[m]),
-            item_size_bytes);
+            item_size_bytes,
+            host_capacity,
+            device_capacity);
       }
       start += cnt;
     }
@@ -974,6 +1005,10 @@ void copy_cache_planned(
   if (miss_dst_locs.strides()[0] != plan_stride) {
     throw std::runtime_error("copy_cache_planned: miss_src/miss_dst row strides differ");
   }
+  const int64_t host_capacity = host_cache_k.shape()[0] *
+      (IsDsv4Layout ? device::hisparse::kPageSize : 1);
+  const int64_t device_capacity = device_buffer_k.shape()[0] *
+      (IsDsv4Layout ? device::hisparse::kPageSize : 1);
   const auto device = LaunchKernel::resolve_device(miss_src_locs.device());
   LaunchKernel(num_blocks, BLOCK_SIZE, device)(
       copy_cache_planned_kernel<BLOCK_SIZE, IsMLA, IsDsv4Layout, SkipIO>,
@@ -986,7 +1021,9 @@ void copy_cache_planned(
       device_buffer_k.data_ptr(),
       (IsMLA || device_buffer_v.ndim() == 0) ? (void*)nullptr : device_buffer_v.data_ptr(),
       plan_stride,
-      item_size_bytes);
+      item_size_bytes,
+      host_capacity,
+      device_capacity);
 }
 
 }  // namespace sglang
