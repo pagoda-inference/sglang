@@ -587,6 +587,39 @@ class TestLoadBalanceMethod(unittest.TestCase):
         self.assertFalse(server_args.disable_radix_cache)
         self.assertEqual(server_args.disaggregation_transfer_backend, "mooncake")
 
+    def test_mooncake_prefill_cp_disables_cached_prefix_early_send(self):
+        server_args = ServerArgs(
+            model_path="dummy",
+            disaggregation_mode="prefill",
+            disaggregation_transfer_backend="mooncake",
+            enable_prefill_cp=True,
+            cp_strategy="interleave",
+        )
+        envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.clear()
+        try:
+            server_args._handle_pd_disaggregation()
+
+            self.assertFalse(
+                envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.get()
+            )
+        finally:
+            envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.clear()
+
+    def test_mooncake_prefill_cp_respects_explicit_early_send(self):
+        server_args = ServerArgs(
+            model_path="dummy",
+            disaggregation_mode="prefill",
+            disaggregation_transfer_backend="mooncake",
+            enable_prefill_cp=True,
+            cp_strategy="interleave",
+        )
+        with envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.override(True):
+            server_args._handle_pd_disaggregation()
+
+            self.assertTrue(
+                envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.get()
+            )
+
 
 class TestSkipTokenizerInit(unittest.TestCase):
     def test_skip_tokenizer_worker_counts(self):

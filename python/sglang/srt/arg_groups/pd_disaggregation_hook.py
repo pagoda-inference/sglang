@@ -101,6 +101,16 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
         assert (
             server_args.disaggregation_transfer_backend != "fake"
         ), "Prefill server does not support 'fake' as the transfer backend"
+        if (
+            server_args.disaggregation_transfer_backend == "mooncake"
+            and server_args.enable_prefill_cp
+            and not envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.is_set()
+        ):
+            envs.SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX.set(False)
+            logger.warning(
+                "Mooncake cached-prefix early-send is disabled for prefill CP "
+                "because RDMA reads can race forward-pass KV writes"
+            )
 
         if envs.SGLANG_RUST_SERVER.get():
             _alias_bootstrap_port_to_api_port(server_args)

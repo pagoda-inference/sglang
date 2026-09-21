@@ -1653,6 +1653,8 @@ class MooncakeKVManager(CommonKVManager):
                     self._staging_outstanding.pop(kv_chunk.room, None)
                     continue
 
+                self._wait_for_producer(kv_chunk)
+
                 # Count each chunk once; the flag survives re-enqueue on defer.
                 if not kv_chunk.staging_counted:
                     self._staging_outstanding[kv_chunk.room] += 1
@@ -1956,6 +1958,11 @@ class MooncakeKVManager(CommonKVManager):
                     f"Transfer thread failed because of {e}. Prefill instance with bootstrap_port={self.bootstrap_port} is dead."
                 )
 
+    @staticmethod
+    def _wait_for_producer(kv_chunk: TransferKVChunk) -> None:
+        if kv_chunk.wait_event is not None:
+            kv_chunk.wait_event.synchronize()
+
     def start_prefill_thread(self):
         def bootstrap_thread():
             """This thread recvs pre-alloc notification from the decode engine"""
@@ -2147,6 +2154,7 @@ class MooncakeKVManager(CommonKVManager):
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
         trace_ctx: Optional[Union[TraceReqContext, TraceNullContext]] = None,
+        wait_event: Optional[object] = None,
     ):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
         assert not is_last_chunk or (is_last_chunk and aux_index is not None)
@@ -2186,6 +2194,7 @@ class MooncakeKVManager(CommonKVManager):
                 state_indices=state_indices,
                 num_kv_tokens=num_kv_tokens,
                 trace_ctx=trace_ctx,
+                wait_event=wait_event,
             )
         )
 
@@ -2273,6 +2282,9 @@ class MooncakeKVSender(CommonKVSender):
         if should_skip:
             return
 
+        wait_event = getattr(self, "_early_send_wait_event", None)
+        self._early_send_wait_event = None
+
         if not is_last_chunk:
             self.kv_mgr.add_transfer_request(
                 self.bootstrap_room,
@@ -2281,6 +2293,7 @@ class MooncakeKVSender(CommonKVSender):
                 False,
                 num_kv_tokens=num_kv_tokens,
                 trace_ctx=self.trace_ctx.copy_for_thread(),
+                wait_event=wait_event,
             )
         else:
             self.kv_mgr.add_transfer_request(
@@ -2292,6 +2305,7 @@ class MooncakeKVSender(CommonKVSender):
                 state_indices=state_indices,
                 num_kv_tokens=num_kv_tokens,
                 trace_ctx=self.trace_ctx.copy_for_thread(),
+                wait_event=wait_event,
             )
         self._record_transfer_indices(kv_indices, state_indices)
 
