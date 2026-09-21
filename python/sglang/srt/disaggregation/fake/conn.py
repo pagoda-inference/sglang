@@ -79,6 +79,7 @@ class FakeKVSender(BaseKVSender):
         kv_indices: npt.NDArray[np.int32],
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         self.has_sent = True
         logger.debug(
@@ -127,6 +128,7 @@ class FakeKVReceiver(BaseKVReceiver):
         aux_index: Optional[int] = None,
         state_indices: Optional[List] = None,
         decode_prefix_len: Optional[int] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         self.has_sent_metadata = True
         logger.debug(

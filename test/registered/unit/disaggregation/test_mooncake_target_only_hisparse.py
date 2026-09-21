@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from sglang.srt.disaggregation.fake.conn import FakeKVReceiver, FakeKVSender
 from sglang.srt.disaggregation.mooncake.conn import MooncakeKVManager
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -10,6 +11,24 @@ register_cpu_ci(est_time=2, suite="stage-a-test-cpu")
 
 
 class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
+    def test_fake_transfer_components_accept_draft_indices(self):
+        receiver = FakeKVReceiver.__new__(FakeKVReceiver)
+        receiver.has_sent_metadata = False
+        receiver.send_metadata(
+            np.array([1, 2], dtype=np.int32),
+            draft_kv_indices=np.array([3, 4], dtype=np.int32),
+        )
+
+        sender = FakeKVSender.__new__(FakeKVSender)
+        sender.has_sent = False
+        sender.send(
+            np.array([1, 2], dtype=np.int32),
+            draft_kv_indices=np.array([3, 4], dtype=np.int32),
+        )
+
+        self.assertTrue(receiver.has_sent_metadata)
+        self.assertTrue(sender.has_sent)
+
     def test_target_and_draft_use_separate_pointer_index_spaces(self):
         manager = MooncakeKVManager.__new__(MooncakeKVManager)
         manager.kv_args = SimpleNamespace(

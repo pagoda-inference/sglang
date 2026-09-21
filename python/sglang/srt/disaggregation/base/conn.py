@@ -139,6 +139,7 @@ class BaseKVSender(ABC):
         kv_indices: npt.NDArray[np.int32],
         state_indices: Optional[List] = None,
         num_kv_tokens: Optional[int] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         """
         Send the kv cache at the given kv indices and the extra cache/state at the given indices to the decoder server.
@@ -209,6 +210,7 @@ class BaseKVReceiver(ABC):
         aux_index: Optional[int] = None,
         state_indices: Optional[List] = None,
         decode_prefix_len: Optional[int] = None,
+        draft_kv_indices: Optional[npt.NDArray[np.int32]] = None,
     ):
         """
         Notify the prefill server about the kv indices, aux index, and state_indices.
