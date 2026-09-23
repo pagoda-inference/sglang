@@ -1243,6 +1243,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 return batch_output
         else:
             self.activate_step_by_batch(batch.seq_lens.shape[0])
+            hisparse_coordinator = self.target_worker.model_runner.hisparse_coordinator
             _log_hisparse_spec_phase("start", self.ps.attn_dp_rank, batch)
 
             if batch.spec_info is None:
@@ -1273,7 +1274,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     ),
                     speculative_moe_backend_context(),
                     speculative_moe_a2a_backend_context(),
-                    spec_stage_span("draft"),
+                    spec_stage_span("draft", hisparse_coordinator=hisparse_coordinator),
                 ):
                     verify_input: EagleVerifyInput = self.draft_worker.draft(batch)
             _log_hisparse_spec_phase(
@@ -1282,7 +1283,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
             _log_hisparse_spec_phase("before-verify", self.ps.attn_dp_rank, batch)
-            with spec_stage_span('verify'):
+            with spec_stage_span(
+                'verify', hisparse_coordinator=hisparse_coordinator
+            ):
                 batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
             _log_hisparse_spec_phase("after-verify", self.ps.attn_dp_rank, batch)
             # Publish before draft_extend so the fence is at verify-end.
@@ -1300,7 +1303,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     ),
                     speculative_moe_backend_context(),
                     speculative_moe_a2a_backend_context(),
-                    spec_stage_span("draft_extend"),
+                    spec_stage_span(
+                        "draft_extend", hisparse_coordinator=hisparse_coordinator
+                    ),
                 ):
                     self.draft_worker._draft_extend_for_decode(batch, batch_output)
             _log_hisparse_spec_phase("after-draft-extend", self.ps.attn_dp_rank, batch)

@@ -687,7 +687,7 @@ def draft_tp_context(tp_group: GroupCoordinator):
         yield
 
 
-def spec_stage_span(name: str):
+def spec_stage_span(name: str, hisparse_coordinator=None):
     """Profiler span for a coarse speculative-decoding stage (``draft`` /
     ``draft_extend`` / ``verify``).
     """
@@ -696,8 +696,15 @@ def spec_stage_span(name: str):
         and get_parallel().enable_dp_attention
         and get_spec().speculative_algorithm is not None
     ):
+        device = getattr(hisparse_coordinator, "device", "cuda")
+        device_module = torch.get_device_module(device)
+        if hisparse_coordinator is not None:
+            hisparse_coordinator.decode_backup_stream.synchronize()
+            hisparse_coordinator.write_staging_stream.synchronize()
+            if hisparse_coordinator.enable_prefetch:
+                hisparse_coordinator.prefetch_stream.synchronize()
         get_tp_group().barrier()
-        torch.cuda.synchronize()
+        device_module.current_stream().synchronize()
     return profile_range(name)
 
 
