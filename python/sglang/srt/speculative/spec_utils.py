@@ -697,6 +697,7 @@ def spec_stage_span(name: str):
         and get_spec().speculative_algorithm is not None
     ):
         get_tp_group().barrier()
+        torch.cuda.synchronize()
     return profile_range(name)
 
 
