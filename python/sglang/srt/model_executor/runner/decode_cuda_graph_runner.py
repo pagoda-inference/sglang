@@ -1349,6 +1349,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         ):
             forward_batch.spec_info.custom_mask = buffers.custom_mask
 
+        if self.model_runner.hisparse_coordinator is not None:
+            self.model_runner.hisparse_coordinator.num_real_reqs.fill_(raw_bs)
+
         attn_backend = self._replay_attn_backend()
         fb_view = build_replay_fb_view(
             forward_batch=forward_batch,
@@ -1367,9 +1370,6 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         self.bs = bs
         if is_ragged:
             self._ragged_graph_size = graph_size_key
-
-        if self.model_runner.hisparse_coordinator is not None:
-            self.model_runner.hisparse_coordinator.num_real_reqs.fill_(raw_bs)
 
         variant_label = self._resolve_lora_variant(forward_batch)
         dsa_variant = self._resolve_dsa_variant(forward_batch)

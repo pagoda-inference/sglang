@@ -6707,6 +6707,19 @@ class ServerArgs:
                 )
 
         if self._resolved().enable_dp_attention:
+            if (
+                self.enable_hisparse
+                and self.speculative_algorithm is not None
+                and self.disaggregation_mode == "decode"
+                and not self.enable_dp_attention_local_control_broadcast
+            ):
+                self.enable_dp_attention_local_control_broadcast = True
+                logger.info(
+                    "Enabled DP-attention local control broadcast for HiSparse "
+                    "speculative decode. This avoids crossing the scheduler "
+                    "control-plane broadcast with DP-attention GPU collectives "
+                    "when active and idle DP ranks have different cleanup latency."
+                )
             self.schedule_conservativeness = self.schedule_conservativeness * 0.3
             assert self.tp_size % self.dp_size == 0
             original_chunked_prefill_size = self.chunked_prefill_size

@@ -166,6 +166,13 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
 
         self._cell_size = self._compute_cell_size(kvc, num_layers)
         self._dense_draft_kv_size = 0
+        self._hisparse_spec_plan = None
+        self._hisparse_num_layers = num_layers
+        self._hisparse_extra_req_slots = (
+            get_disagg().disaggregation_decode_extra_slots
+            if get_disagg().disaggregation_mode == "decode"
+            else 0
+        )
         self.use_hisparse_memory_config = (
             get_memory().enable_hisparse
             and kvc.use_mla_backend
@@ -174,9 +181,15 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             and get_disagg().disaggregation_mode == "decode"
         )
         if self.use_hisparse_memory_config:
+            from sglang.srt.mem_cache.hisparse_spec import resolve_hisparse_spec_plan
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
             hisparse_config = parse_hisparse_config(kvc.server_args)
+            self._hisparse_spec_plan = resolve_hisparse_spec_plan(
+                server_args=kvc.server_args,
+                hf_text_config=kvc.model_config.hf_text_config,
+                is_draft_worker=kvc.is_draft_worker,
+            )
             self._hisparse_device_buffer_size = hisparse_config.device_buffer_size
             self._hisparse_host_to_device_ratio = hisparse_config.host_to_device_ratio
             max_running_requests = get_schedule().max_running_requests
@@ -456,11 +469,26 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         if self.use_hisparse_memory_config:
             host_to_device_ratio = self._hisparse_host_to_device_ratio
             hot_tokens = (
-                (self._hisparse_device_buffer_size + page_size)
-                * self._hisparse_max_running_requests
-            )
+                self._hisparse_device_buffer_size + page_size
+            ) * self._hisparse_max_running_requests
             hot_tokens = ceil_align(hot_tokens, page_size)
-            remaining_gpu_bytes = available_bytes - hot_tokens * self._main_kv_size
+            hisparse_spec_fixed_bytes = 0
+            if self._hisparse_spec_plan is not None:
+                hisparse_spec_fixed_bytes = (
+                    self._hisparse_spec_plan.layout.fixed_state_bytes(
+                        num_layers=self._hisparse_num_layers,
+                        num_req_slots=(
+                            self._hisparse_max_running_requests
+                            + self._hisparse_extra_req_slots
+                            + 1
+                        ),
+                    )
+                )
+            remaining_gpu_bytes = (
+                available_bytes
+                - hot_tokens * self._main_kv_size
+                - hisparse_spec_fixed_bytes
+            )
             if remaining_gpu_bytes <= 0:
                 raise RuntimeError(
                     "HiSparse GPU memory cannot fit the required hot buffer: "
@@ -514,9 +542,8 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         max_total_num_tokens = max_total_num_tokens // page_size * page_size
         if self.use_hisparse_memory_config:
             hot_tokens = (
-                (self._hisparse_device_buffer_size + page_size)
-                * self._hisparse_max_running_requests
-            )
+                self._hisparse_device_buffer_size + page_size
+            ) * self._hisparse_max_running_requests
             hot_tokens = ceil_align(hot_tokens, page_size)
             min_logical_tokens = hot_tokens * self._hisparse_host_to_device_ratio
             if max_total_num_tokens < min_logical_tokens:

@@ -505,9 +505,6 @@ def eagle_prepare_for_verify(
         ForwardMode,
     )
     from sglang.srt.speculative.spec_utils import prepare_mamba_track_for_verify
-    from sglang.srt.speculative.eagle_worker_common import (
-        _prepare_hisparse_target_verify,
-    )
 
     if not batch.forward_mode.is_idle():
         # Assign cache locations
@@ -535,10 +532,6 @@ def eagle_prepare_for_verify(
         batch.out_cache_loc_dsv4 = maybe_build_dsv4_verify_bundle(
             batch, verify_input.draft_token_num
         )
-        _prepare_hisparse_target_verify(
-            batch, verify_input.draft_token_num, verify_input.topk
-        )
-
         prepare_mamba_track_for_verify(batch)
 
         # TBO's split_spec_info reads these; no-verify-sync leaves both None.
@@ -566,7 +559,6 @@ def eagle_prepare_for_verify(
     # Run attention backend plan and cuda graph preparation
     can_run_cuda_graph = bool(
         target_worker.model_runner.decode_cuda_graph_runner
-        and batch.hisparse_coordinator is None
         and target_worker.model_runner.decode_cuda_graph_runner.can_run_graph(
             verify_forward_batch
         )
@@ -963,6 +955,13 @@ def eagle_prepare_for_decode(batch: ScheduleBatch):
     reqs = batch.reqs
     cur_kv_lens = cur_kv_lens_device
     nxt_kv_lens = nxt_kv_lens_device
+    coordinator = batch.hisparse_coordinator
+    if coordinator is not None and coordinator.speculative_verify_enabled:
+        coordinator.wait_for_pending_backup()
+        coordinator.reserve_speculative_host_slots(
+            req_pool_indices_cpu=batch.req_pool_indices_cpu,
+            reserved_seq_lens_cpu=nxt_kv_lens_cpu,
+        )
     alloc_for_spec_decode(
         tree_cache,
         req_to_token_pool,

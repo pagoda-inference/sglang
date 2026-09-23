@@ -5,14 +5,37 @@ import numpy as np
 import torch
 
 from sglang.srt.disaggregation.fake.conn import FakeKVReceiver, FakeKVSender
-from sglang.srt.disaggregation.prefill import SchedulerDisaggregationPrefillMixin
 from sglang.srt.disaggregation.mooncake.conn import MooncakeKVManager
+from sglang.srt.disaggregation.prefill import SchedulerDisaggregationPrefillMixin
+from sglang.srt.mem_cache.hisparse_spec import build_hisparse_spec_layout
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=2, suite="stage-a-test-cpu")
 
 
 class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
+    def test_mtp_layout_allows_repeated_topk_occurrences(self):
+        layout = build_hisparse_spec_layout(
+            hot_slots=8192,
+            tail_capacity_slots=64,
+            compress_ratio=1,
+            verify_width=4,
+            top_k=2048,
+        )
+
+        self.assertEqual(layout.occurrences, 8192)
+        self.assertEqual(layout.speculative_slots, 4)
+        self.assertEqual(layout.scratch_slots, 59)
+
+        with self.assertRaisesRegex(ValueError, "Invalid HiSparse speculative layout"):
+            build_hisparse_spec_layout(
+                hot_slots=2048,
+                tail_capacity_slots=64,
+                compress_ratio=1,
+                verify_width=4,
+                top_k=2048,
+            )
+
     def test_prefill_send_kv_chunk_uses_scheduler_draft_pool(self):
         class Scheduler(SchedulerDisaggregationPrefillMixin):
             pass
@@ -47,9 +70,7 @@ class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
 
         self.assertEqual(req.start_send_idx, 128)
         self.assertEqual(len(sends), 1)
-        np.testing.assert_array_equal(
-            sends[0][1]["draft_kv_indices"], [0, 1]
-        )
+        np.testing.assert_array_equal(sends[0][1]["draft_kv_indices"], [0, 1])
 
     def test_fake_transfer_components_accept_draft_indices(self):
         receiver = FakeKVReceiver.__new__(FakeKVReceiver)
@@ -112,6 +133,41 @@ class TestMooncakeTargetOnlyHiSparseTransfer(unittest.TestCase):
         self.assertEqual(calls[1]["dst_data_ptrs"], [400])
         np.testing.assert_array_equal(calls[1]["prefill_data_indices"], [4, 5])
         np.testing.assert_array_equal(calls[1]["dst_data_indices"], [20, 21])
+
+    def test_hisparse_path_expands_pages_to_token_indices(self):
+        manager = MooncakeKVManager.__new__(MooncakeKVManager)
+        manager.kv_args = SimpleNamespace(
+            kv_data_ptrs=[100, 200],
+            kv_item_lens=[8, 8],
+            kv_layer_ids=[],
+            page_size=4,
+            target_kv_data_ptr_count=1,
+            draft_kv_data_ptr_count=1,
+        )
+        calls = []
+        manager._send_kvcache_generic = lambda **kwargs: calls.append(kwargs) or 0
+
+        ret = manager.send_kvcache_hisparse(
+            mooncake_session_id="session",
+            prefill_kv_indices=np.array([2], dtype=np.int32),
+            dst_kv_ptrs=[300, 400],
+            dst_kv_indices=np.array([7], dtype=np.int32),
+            page_index_slice=slice(0, 1),
+            executor=None,
+            dst_draft_kv_indices=np.array([40, 41, 42, 43], dtype=np.int32),
+            dst_target_kv_data_ptr_count=1,
+            dst_draft_kv_data_ptr_count=1,
+            prefill_draft_kv_indices=np.array([3], dtype=np.int32),
+        )
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(len(calls), 2)
+        np.testing.assert_array_equal(calls[0]["prefill_data_indices"], [8, 9, 10, 11])
+        np.testing.assert_array_equal(calls[0]["dst_data_indices"], [28, 29, 30, 31])
+        np.testing.assert_array_equal(
+            calls[1]["prefill_data_indices"], [12, 13, 14, 15]
+        )
+        np.testing.assert_array_equal(calls[1]["dst_data_indices"], [40, 41, 42, 43])
 
     def test_legacy_dense_path_keeps_appended_draft_pointers(self):
         manager = MooncakeKVManager.__new__(MooncakeKVManager)

@@ -102,6 +102,12 @@ def validate_hisparse(server_args: ServerArgs) -> None:
     from sglang.srt.arg_groups.overrides import resolved_view
 
     if server_args.speculative_algorithm is not None:
+        from sglang.srt.mem_cache.hisparse_spec import resolve_hisparse_spec_plan
+
+        resolve_hisparse_spec_plan(
+            server_args=server_args,
+            hf_text_config=server_args.get_model_config().hf_text_config,
+        )
         if is_v4_hisparse:
             raise ValueError(
                 "Target-only HiSparse speculative decoding is implemented for "

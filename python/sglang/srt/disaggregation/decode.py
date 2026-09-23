@@ -460,6 +460,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             kv_item_lens += device_kv_item_lens[c4_layer_num:]
             kv_data_mem_kinds += ["VRAM"] * len(device_kv_data_ptrs[c4_layer_num:])
         kv_args.target_kv_data_ptr_count = len(kv_data_ptrs)
+        kv_args.is_hisparse = self.scheduler.enable_hisparse
         if self.draft_token_to_kv_pool is not None:
             # We should also transfer draft model kv cache. The indices are
             # always shared with a target model.
@@ -1016,7 +1017,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         # HiSparse physical constraint: max requests by device buffer capacity.
         # Each admitted req needs padded_buffer_size from hisparse device pool.
         # waiting_queue reqs already have device buffers (allocated in admit_request_direct),
-        # only transfer_queue reqs are pending device buffer allocation.
+        # Count both pending bootstrap and transfer requests without buffers.
         hisparse_req_budget = float("inf")
         if self.scheduler.enable_hisparse:
             hisparse_avail = (
@@ -1025,7 +1026,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             hisparse_req_budget = max(
                 0,
                 hisparse_avail // self.scheduler.hisparse_coordinator.padded_buffer_size
-                - len(self.transfer_queue.queue),
+                - self._hisparse_pending_device_requests(),
             )
 
         # Then, preallocate the remaining requests if possible
@@ -1306,26 +1307,44 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             metadata_kwargs = {"decode_prefix_len": total_prefix_len}
             if device_page_indices is not None:
                 metadata_kwargs["device_kv_indices"] = device_page_indices
-            if (
-                self.draft_token_to_kv_pool is not None
-                and (
-                    self.scheduler.enable_hisparse
-                    or self.transfer_backend == TransferBackend.MOONCAKE
+            elif (
+                self.scheduler.enable_hisparse
+                and self.draft_token_to_kv_pool is not None
+                and not isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool)
+                and not _is_fake_transfer(decode_req.req, self.scheduler.server_args)
+            ):
+                # Target KV lands in token-addressed host slots. The resident
+                # draft pool instead uses the shared logical token IDs.
+                metadata_kwargs.update(
+                    device_kv_indices=(
+                        self.req_to_token_pool.req_to_token[
+                            decode_req.req.req_pool_idx,
+                            prefix_len:origin_input_len,
+                        ]
+                        .cpu()
+                        .numpy()
+                        .astype(np.int32)
+                    )
                 )
+            if self.draft_token_to_kv_pool is not None and (
+                self.scheduler.enable_hisparse
+                or self.transfer_backend == TransferBackend.MOONCAKE
             ):
                 if self.transfer_backend != TransferBackend.MOONCAKE:
                     raise NotImplementedError(
                         "HiSparse target with a dense draft pool currently requires "
                         "the Mooncake transfer backend"
                     )
-                draft_page_indices = kv_to_page_indices(
+                draft_kv_indices = (
                     self.req_to_token_pool.req_to_token[
                         decode_req.req.req_pool_idx,
                         prefix_len:origin_input_len,
-                    ],
-                    page_size,
-                ).astype(np.int32)
-                metadata_kwargs["draft_kv_indices"] = draft_page_indices
+                    ]
+                    .cpu()
+                    .numpy()
+                    .astype(np.int32)
+                )
+                metadata_kwargs["draft_kv_indices"] = draft_kv_indices
             if (
                 self.transfer_queue.enable_staging
                 and hasattr(decode_req.kv_receiver, "require_staging")
@@ -1357,6 +1376,21 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         ]
 
         return preallocated_reqs, failed_reqs
+
+    def _hisparse_pending_device_requests(self) -> int:
+        coordinator = self.scheduler.hisparse_coordinator
+        pending_slots = set()
+        for entry in (*self.transfer_queue.queue, *self.pending_reqs):
+            req = entry.req
+            slot = req.req_pool_idx
+            if (
+                slot is not None
+                and req.kv is not None
+                and req.kv.kv_allocated_len > 0
+                and coordinator.req_device_buffer_size[slot] == 0
+            ):
+                pending_slots.add(slot)
+        return len(pending_slots)
 
     @property
     def has_published_destinations(self) -> bool:
@@ -2184,7 +2218,9 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                 and self.staging_handler is not None
                 and self.staging_handler.is_staging_room(decode_req.req.bootstrap_room)
             ):
-                self.staging_handler.unregister_decode_req(decode_req.req.bootstrap_room)
+                self.staging_handler.unregister_decode_req(
+                    decode_req.req.bootstrap_room
+                )
             metadata_buffer_index = decode_req.metadata_buffer_index
             if metadata_buffer_index != -1:
                 self.metadata_buffers.bootstrap_room[metadata_buffer_index] = 0

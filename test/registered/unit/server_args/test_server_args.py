@@ -119,6 +119,23 @@ class TestPrepareServerArgs(CustomTestCase):
 
 
 class TestMmEncoderDataParallelLogging(CustomTestCase):
+    def test_hisparse_spec_decode_uses_local_control_broadcast(self):
+        server_args = ServerArgs(
+            model_path="dummy",
+            tp_size=4,
+            dp_size=4,
+            enable_dp_attention=True,
+            enable_hisparse=True,
+            speculative_algorithm="NEXTN",
+            disaggregation_mode="decode",
+            chunked_prefill_size=16,
+            cuda_graph_config=CudaGraphConfig(),
+        )
+
+        server_args._handle_data_parallelism()
+
+        self.assertTrue(server_args.enable_dp_attention_local_control_broadcast)
+
     def test_logs_when_encoder_dp_has_no_parallelism(self):
         server_args = ServerArgs(
             model_path="dummy", mm_enable_dp_encoder=True, tp_size=1

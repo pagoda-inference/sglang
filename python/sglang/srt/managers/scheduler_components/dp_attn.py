@@ -26,7 +26,7 @@ from sglang.srt.model_executor.cuda_graph_config import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.metrics_collector import DPCooperationInfo
-from sglang.srt.runtime_context import get_parallel, get_schedule
+from sglang.srt.runtime_context import get_memory, get_parallel, get_schedule
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils.common import require_mlp_tp_gather
@@ -230,6 +230,28 @@ def _update_gather_batch(
     batch.can_run_dp_breakable_cuda_graph = mlp_sync_info.can_run_prefill_cuda_graph
 
 
+def _can_run_hisparse_mtp_cuda_graph(model_runner, local_batch) -> bool:
+    """IndexShare needs a real seed before its first draft graph replay."""
+    if not (
+        get_memory().enable_hisparse
+        and local_batch is not None
+        and local_batch.forward_mode.is_decode()
+        and local_batch.spec_algorithm.is_eagle()
+        and getattr(
+            model_runner.model_config.hf_text_config,
+            "index_share_for_mtp_iteration",
+            False,
+        )
+    ):
+        return True
+    draft_input = local_batch.spec_info
+    return draft_input is not None and (
+        draft_input.future_dsa_topk_indices_available
+        if draft_input.future_indices is not None
+        else draft_input.dsa_topk_indices is not None
+    )
+
+
 def prepare_mlp_sync_batch_raw(
     local_batch: ScheduleBatch,
     model_runner: ModelRunner,
@@ -276,6 +298,10 @@ def prepare_mlp_sync_batch_raw(
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
     ) and not disable_cuda_graph
+    can_run_decode_cuda_graph = (
+        can_run_decode_cuda_graph
+        and _can_run_hisparse_mtp_cuda_graph(model_runner, local_batch)
+    )
     can_draft_cuda_graph = not (
         local_batch is not None
         and getattr(local_batch, "force_disable_draft_cuda_graph", False)

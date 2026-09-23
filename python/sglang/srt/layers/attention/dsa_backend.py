@@ -344,7 +344,7 @@ class DeepseekSparseAttnBackend(
         seed_dsa_topk_from_draft_extend: bool = False,
     ):
         super().__init__()
-        self.forward_metadata: DSAMetadata
+        self.forward_metadata: Optional[DSAMetadata] = None
         self.device = model_runner.device
         assert isinstance(model_runner.page_size, int)
         self.real_page_size = model_runner.page_size
@@ -1112,6 +1112,57 @@ class DeepseekSparseAttnBackend(
             topk_v2_plan=self._build_topk_v2_plan(seqlens_expanded),
         )
         self.forward_metadata = metadata
+
+        self.init_forward_metadata_in_graph(forward_batch)
+
+    def init_forward_metadata_in_graph(self, forward_batch: ForwardBatch):
+        coordinator = self.hisparse_coordinator
+        if (
+            coordinator is not None
+            and coordinator.speculative_verify_enabled
+            and forward_batch.forward_mode.is_target_verify()
+            and forward_batch.batch_size > 0
+        ):
+            num_tokens = forward_batch.batch_size * coordinator.spec_layout.verify_width
+            coordinator.prepare_speculative_verify(
+                req_pool_indices=forward_batch.req_pool_indices,
+                prefix_lens=forward_batch.seq_lens,
+                compressed_out_locs=forward_batch.out_cache_loc[:num_tokens],
+            )
+
+    def _is_empty_idle(self, forward_batch: ForwardBatch) -> bool:
+        real_batch_size = getattr(forward_batch, "_original_batch_size", None)
+        if real_batch_size is None:
+            real_batch_size = forward_batch.batch_size
+        return forward_batch.forward_mode.is_idle() and real_batch_size == 0
+
+    def _swap_in_hisparse_verify_pages(
+        self,
+        forward_batch: ForwardBatch,
+        topk_indices: torch.Tensor,
+        layer_id: int,
+        output_num_tokens: int,
+    ) -> torch.Tensor:
+        coordinator = self.hisparse_coordinator
+        layout = coordinator.spec_layout
+        num_rows = forward_batch.batch_size * layout.verify_width
+        if (
+            topk_indices is None
+            or topk_indices.ndim != 2
+            or topk_indices.shape[0] < num_rows
+            or topk_indices.shape[1] != layout.top_k
+            or output_num_tokens < num_rows
+        ):
+            raise ValueError(
+                "HiSparse DSA verify requires B * W position-space top-k rows."
+            )
+        page_table = coordinator.swap_in_speculative_pages(
+            req_pool_indices=forward_batch.req_pool_indices,
+            compressed_seq_lens=self.forward_metadata.dsa_seqlens_expanded[:num_rows],
+            top_k_result=topk_indices[:num_rows].contiguous(),
+            layer_id=layer_id,
+        )
+        return self._pad_topk_indices(page_table, output_num_tokens)
 
     def _cal_indexer_k_start_end(
         self,
@@ -1930,6 +1981,12 @@ class DeepseekSparseAttnBackend(
         causal = not layer.is_cross_attention
         metadata = self.forward_metadata
         assert causal, "DSA is causal only"
+        if metadata is None:
+            if not self._is_empty_idle(forward_batch):
+                raise RuntimeError(
+                    "DSA forward metadata is missing for a nonempty batch."
+                )
+            return q.new_zeros((q.shape[0], layer.tp_q_head_num, layer.v_head_dim))
 
         dsa_impl = (
             self.dsa_decode_impl
@@ -2008,7 +2065,16 @@ class DeepseekSparseAttnBackend(
             forward_batch.forward_mode
         )
 
-        if self.use_fused_topk:
+        hisparse_verify = (
+            self.hisparse_coordinator is not None
+            and self.hisparse_coordinator.speculative_verify_enabled
+            and forward_batch.forward_mode.is_target_verify()
+        )
+        if hisparse_verify:
+            page_table_1 = self._swap_in_hisparse_verify_pages(
+                forward_batch, topk_indices, layer.layer_id, q_nope.shape[0]
+            )
+        elif self.use_fused_topk:
             if topk_indices is not None:
                 topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
@@ -2044,7 +2110,7 @@ class DeepseekSparseAttnBackend(
                 )
 
         # todo hisparse: to cover more backends
-        if self.hisparse_coordinator is not None:
+        if self.hisparse_coordinator is not None and not hisparse_verify:
             # flash_mla_sparse_fwd / tilelang require int32 page indices.
             page_table_1 = self.token_to_kv_pool.translate_loc_to_hisparse_device(
                 page_table_1
@@ -2240,6 +2306,12 @@ class DeepseekSparseAttnBackend(
         causal = not layer.is_cross_attention
         metadata = self.forward_metadata
         assert causal, "DSA is causal only"
+        if metadata is None:
+            if not self._is_empty_idle(forward_batch):
+                raise RuntimeError(
+                    "DSA forward metadata is missing for a nonempty batch."
+                )
+            return q.new_zeros((q.shape[0], layer.tp_q_head_num, layer.v_head_dim))
 
         if self.dsa_decode_impl == "trtllm":
             return self._forward_trtllm(
@@ -3461,10 +3533,19 @@ class DeepseekSparseAttnBackend(
 
     def get_indexer_metadata(
         self, layer_id: int, forward_batch: ForwardBatch
-    ) -> DSAIndexerMetadata:
+    ) -> Optional[DSAIndexerMetadata]:
+        if self.forward_metadata is None:
+            if not self._is_empty_idle(forward_batch):
+                raise RuntimeError(
+                    "DSA indexer metadata is missing for a nonempty batch."
+                )
+            return None
         force_unfused = not self.use_fused_topk or (
             self.hisparse_coordinator is not None
-            and forward_batch.forward_mode.is_decode_or_idle()
+            and (
+                forward_batch.forward_mode.is_decode_or_idle()
+                or forward_batch.forward_mode.is_target_verify()
+            )
         )
         return DSAIndexerMetadata(
             attn_metadata=self.forward_metadata,

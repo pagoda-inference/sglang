@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -15,6 +16,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
 )
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_utils import (
     TreeMaskMode,
@@ -458,78 +460,6 @@ def _compact_accept_to_front(
     return out
 
 
-def _finalize_hisparse_target_verify(
-    batch: ScheduleBatch,
-    accept_index: torch.Tensor,
-    topk: int,
-) -> None:
-    hisparse_coordinator = getattr(batch, "hisparse_coordinator", None)
-    if hisparse_coordinator is None or batch.forward_mode.is_idle():
-        return
-    if topk > 1:
-        raise NotImplementedError(
-            "HiSparse target-only speculative decoding currently supports chain "
-            "MTP (topk=1), not tree verification"
-        )
-
-    accept_counts = (accept_index != -1).sum(dim=1)
-    flat_accept_index = accept_index.reshape(-1)
-    accepted_offsets = flat_accept_index[flat_accept_index >= 0].to(torch.int64)
-    total_accepted = int(accept_counts.sum().item())
-    if accepted_offsets.numel() != total_accepted:
-        raise ValueError(
-            "HiSparse target verify accepted-index mismatch: expected "
-            f"{total_accepted}, got {accepted_offsets.numel()}"
-        )
-
-    offsets = torch.cat(
-        [
-            torch.zeros(1, dtype=torch.int64, device=accept_counts.device),
-            accept_counts.cumsum(0),
-        ]
-    )
-    positions_in_request = (
-        torch.arange(
-            total_accepted, dtype=torch.int64, device=accept_counts.device
-        )
-        - torch.repeat_interleave(offsets[:-1], accept_counts)
-    )
-    accepted_token_positions = (
-        torch.repeat_interleave(batch.seq_lens, accept_counts)
-        + positions_in_request
-    )
-    hisparse_coordinator.finalize_accepted_target_tokens(
-        req_pool_indices=batch.req_pool_indices,
-        accepted_cache_locs=batch.out_cache_loc[accepted_offsets],
-        verify_cache_locs=batch.out_cache_loc,
-        accepted_token_positions=accepted_token_positions,
-        accept_counts=accept_counts,
-    )
-
-
-def _prepare_hisparse_target_verify(
-    batch: ScheduleBatch,
-    draft_token_num: int,
-    topk: int,
-) -> None:
-    hisparse_coordinator = getattr(batch, "hisparse_coordinator", None)
-    if hisparse_coordinator is None or batch.forward_mode.is_idle():
-        return
-    if topk > 1:
-        raise NotImplementedError(
-            "HiSparse target-only speculative decoding currently supports chain "
-            "MTP (one draft token), not tree verification"
-        )
-    hisparse_coordinator.prepare_target_verify_slots(
-        req_pool_indices=batch.req_pool_indices,
-        verify_cache_locs=batch.out_cache_loc,
-        num_tokens_per_req=draft_token_num,
-        start_positions=(
-            batch.seq_lens_cpu if batch.seq_lens_cpu is not None else batch.seq_lens
-        ),
-    )
-
-
 def run_eagle_verify(
     batch: ScheduleBatch,
     *,
@@ -657,8 +587,18 @@ def run_eagle_verify(
         accept_lens,
         accept_index,
     ) = eagle_sample(verify_input, batch, logits_output, grammar_mask)
-    _finalize_hisparse_target_verify(batch, accept_index, topk)
     new_seq_lens = batch.seq_lens + accept_lens
+    coordinator = batch.hisparse_coordinator
+    if (
+        coordinator is not None
+        and coordinator.speculative_verify_enabled
+        and not batch.forward_mode.is_idle()
+    ):
+        coordinator.finalize_speculative_verify(
+            req_pool_indices=batch.req_pool_indices,
+            prefix_lens=batch.seq_lens,
+            commit_lens=accept_lens,
+        )
     clear_unaccepted_c128 = getattr(
         token_to_kv_pool_allocator.get_kvcache(),
         "clear_unaccepted_c128_draft_states",

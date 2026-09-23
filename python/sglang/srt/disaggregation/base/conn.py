@@ -67,6 +67,7 @@ class KVArgs:
     kv_head_num: int
     total_kv_head_num: int
     page_size: int
+    is_hisparse: bool
     # for system dp
     system_dp_rank: int
     # for pp prefill
