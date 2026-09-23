@@ -485,5 +485,6 @@ class SchedulerDPAttnAdapter:
             self.enable_overlap,
             self.spec_algorithm,
         )
+        idle_batch.hisparse_coordinator = self.model_runner.hisparse_coordinator
         idle_batch.prepare_for_idle()
         return idle_batch

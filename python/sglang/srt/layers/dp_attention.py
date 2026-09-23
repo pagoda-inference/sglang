@@ -832,6 +832,22 @@ def dp_scatter(
         )
 
 
+def prewarm_dp_attention_memcpy(
+    width: int, dtype: torch.dtype, device: str | torch.device
+) -> None:
+    global_tokens = torch.empty((1, width), device=device, dtype=dtype)
+    local_tokens = torch.empty_like(global_tokens)
+    offsets = torch.zeros((4,), device=device, dtype=torch.int64)
+    sizes = torch.ones((4,), device=device, dtype=torch.int64)
+
+    for offset_index, size_index in ((0, 0), (0, 1), (1, 2), (1, 3)):
+        offset = offsets[offset_index]
+        size = sizes[size_index]
+        memcpy_triton(local_tokens, global_tokens, 0, offset, size, True)
+        memcpy_triton(global_tokens, local_tokens, 0, offset, size, False)
+    torch.get_device_module(local_tokens.device.type).current_stream().synchronize()
+
+
 def dp_reduce_scatter_tensor(output: torch.Tensor, input: torch.Tensor):
     if is_dp_gatherv_active():
         # Variable-length combine matching all_gatherv dispatch: scatter the

@@ -1425,6 +1425,26 @@ class ModelRunner:
         else:
             forward_batch.prepare_attn_tp_scatter_input(self)
 
+        if envs.SGLANG_ENABLE_HISPARSE_SPEC_PHASE_DEBUG.get():
+            logger.info(
+                "HiSparse spec forward: rank=%s draft=%s mode=%s input_shape=%s "
+                "batch_size=%s original_global=%s padded_global=%s buffer_len=%s "
+                "padding=%s",
+                getattr(self.ps, "attn_dp_rank", None),
+                self.is_draft_worker,
+                forward_batch.forward_mode.name,
+                (
+                    tuple(forward_batch.input_ids.shape)
+                    if forward_batch.input_ids is not None
+                    else None
+                ),
+                forward_batch.batch_size,
+                forward_batch.original_global_num_tokens_cpu,
+                forward_batch.global_num_tokens_cpu,
+                forward_batch.global_dp_buffer_len,
+                forward_batch.dp_padding_mode,
+            )
+
         # Normalize num_token_non_padded to be local to this attention TP rank if needed.
         # The skip is scoped to DSACPLayerCommunicator-style CP (DSA, MLA): those
         # flavors already feed a zigzag-split rank-local layout whose token count

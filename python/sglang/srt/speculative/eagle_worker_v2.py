@@ -126,6 +126,28 @@ _is_xpu = is_xpu()
 logger = logging.getLogger(__name__)
 
 
+def _log_hisparse_spec_phase(phase, rank, batch, spec_info=None):
+    if not envs.SGLANG_ENABLE_HISPARSE_SPEC_PHASE_DEBUG.get():
+        return
+    spec_info = batch.spec_info if spec_info is None else spec_info
+    logger.info(
+        "HiSparse spec phase: rank=%s phase=%s mode=%s bs=%s iter=%s "
+        "spec_type=%s spec_width=%s global_requests=%s can_target_graph=%s "
+        "can_draft_graph=%s force_draft_eager=%s",
+        rank,
+        phase,
+        batch.forward_mode.name,
+        len(batch.seq_lens),
+        batch.forward_iter,
+        type(spec_info).__name__,
+        getattr(spec_info, "num_tokens_per_req", None),
+        batch.global_num_tokens,
+        batch.can_run_dp_cuda_graph,
+        batch.can_run_dp_draft_cuda_graph,
+        batch.force_disable_draft_cuda_graph,
+    )
+
+
 def _slice_draft_output_to_local_tokens(
     next_token_logits: torch.Tensor,
     hidden_states: Optional[torch.Tensor],
@@ -585,6 +607,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
     def draft_forward(self, forward_batch: ForwardBatch):
         # Parse args
         spec_info: EagleDraftInput = forward_batch.spec_info
+        if forward_batch.forward_mode.is_idle():
+            return self._draft_forward_idle(forward_batch, spec_info)
+
         out_cache_loc = forward_batch.out_cache_loc
         topk_p, topk_index, hidden_states = (
             spec_info.topk_p,
@@ -755,6 +780,34 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         )
 
         return parent_list, top_scores_index, draft_tokens, draft_probs
+
+    def _draft_forward_idle(
+        self, forward_batch: ForwardBatch, spec_info: EagleDraftInput
+    ):
+        input_ids = forward_batch.input_ids
+        out_cache_loc = forward_batch.out_cache_loc
+        hidden_states = spec_info.hidden_states
+
+        for i in range(self.speculative_num_steps - 1):
+            forward_batch.input_ids = input_ids
+            forward_batch.out_cache_loc = out_cache_loc
+            spec_info.hidden_states = hidden_states
+            canary_index_ctx = (
+                c.with_active_single_forward_manager(i)
+                if (c := self.draft_runner.canary_manager) is not None
+                else contextlib.nullcontext()
+            )
+            with (
+                forward_context(
+                    ForwardContext(
+                        attn_backend=self.draft_attn_backend.attn_backends[i]
+                    )
+                ),
+                canary_index_ctx,
+            ):
+                self.draft_runner.forward(forward_batch)
+
+        return None, None, None, None
 
     def draft_extend(self):
         pass
@@ -1190,6 +1243,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 return batch_output
         else:
             self.activate_step_by_batch(batch.seq_lens.shape[0])
+            _log_hisparse_spec_phase("start", self.ps.attn_dp_rank, batch)
 
             if batch.spec_info is None:
                 capture_mode = (
@@ -1222,9 +1276,14 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     spec_stage_span("draft"),
                 ):
                     verify_input: EagleVerifyInput = self.draft_worker.draft(batch)
+            _log_hisparse_spec_phase(
+                "after-draft", self.ps.attn_dp_rank, batch, verify_input
+            )
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
+            _log_hisparse_spec_phase("before-verify", self.ps.attn_dp_rank, batch)
             batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
+            _log_hisparse_spec_phase("after-verify", self.ps.attn_dp_rank, batch)
             # Publish before draft_extend so the fence is at verify-end.
             if on_publish is not None:
                 on_publish(batch_output.new_seq_lens)
@@ -1243,6 +1302,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     spec_stage_span("draft_extend"),
                 ):
                     self.draft_worker._draft_extend_for_decode(batch, batch_output)
+            _log_hisparse_spec_phase("after-draft-extend", self.ps.attn_dp_rank, batch)
 
             return batch_output
 

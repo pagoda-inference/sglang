@@ -11,6 +11,7 @@ Anything added here that affects the generated code must also reach
 from __future__ import annotations
 
 import pathlib
+import re
 from typing import List, Optional, Tuple
 
 import msgspec
@@ -18,6 +19,8 @@ import msgspec
 from sglang.kernels.jit.utils.compile.paths import KERNEL_PATH
 
 _MODULE_NAME_PREFIX = "sgl_kernel_jit_"
+_UNSAFE_MODULE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+_SAFE_MODULE_CHARS = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class TranslationUnit(msgspec.Struct, frozen=True):
@@ -54,7 +57,13 @@ class BuildSpec(msgspec.Struct, frozen=True):
     @property
     def module_name(self) -> str:
         """Derived: the args are the module's identity, the name just spells it."""
-        return _MODULE_NAME_PREFIX + "_".join(self.module_args)
+        encoded_args = (
+            _UNSAFE_MODULE_CHARS.sub(
+                lambda match: f"_{ord(match.group()):02X}", module_arg
+            )
+            for module_arg in self.module_args
+        )
+        return _MODULE_NAME_PREFIX + "_".join(encoded_args)
 
     @property
     def sources(self) -> Tuple[str, ...]:

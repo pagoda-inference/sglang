@@ -16,7 +16,7 @@ import pytest
 
 from sglang.kernels.jit.utils.compile import cache, ninja
 from sglang.kernels.jit.utils.compile.paths import KERNEL_PATH
-from sglang.kernels.jit.utils.compile.spec import BuildSpec
+from sglang.kernels.jit.utils.compile.spec import _SAFE_MODULE_CHARS, BuildSpec
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
@@ -75,6 +75,15 @@ def _publish_leaf(scope: pathlib.Path, paths, *, module_name="m") -> pathlib.Pat
     (leaf / cache._DEPS_FILE).write_bytes(msgspec.json.encode(entries))
     (leaf / f"{module_name}.so").write_bytes(b"")
     return leaf
+
+
+def test_module_name_encodes_shell_metacharacters():
+    spec = _spec(module_args=("LinearKVTransferPolicy<656>",))
+
+    assert spec.module_name == "sgl_kernel_jit_LinearKVTransferPolicy_3C656_3E"
+    assert _SAFE_MODULE_CHARS.fullmatch(
+        spec.module_name.removeprefix("sgl_kernel_jit_")
+    )
 
 
 # --------------------------------------------------------------------------
