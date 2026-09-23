@@ -35,6 +35,7 @@ from sglang.srt.configs.hybrid_arch import mambaish_config
 from sglang.srt.constrained.base_grammar_backend import GrammarMask
 from sglang.srt.distributed.parallel_state import (
     GroupCoordinator,
+    get_tp_group,
     patch_tensor_parallel_group,
 )
 from sglang.srt.environ import envs
@@ -48,6 +49,8 @@ from sglang.srt.mem_cache.allocation import (
 )
 from sglang.srt.runtime_context import (
     get_exec,
+    get_memory,
+    get_parallel,
     get_spec,
     mamba_extra_buffer_enabled,
     mamba_extra_buffer_lazy_enabled,
@@ -688,6 +691,12 @@ def spec_stage_span(name: str):
     """Profiler span for a coarse speculative-decoding stage (``draft`` /
     ``draft_extend`` / ``verify``).
     """
+    if (
+        get_memory().enable_hisparse
+        and get_parallel().enable_dp_attention
+        and get_spec().speculative_algorithm is not None
+    ):
+        get_tp_group().barrier()
     return profile_range(name)
 
 

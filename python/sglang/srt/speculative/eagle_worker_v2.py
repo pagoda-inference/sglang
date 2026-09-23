@@ -1282,7 +1282,8 @@ class EAGLEWorkerV2(BaseSpecWorker):
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
             _log_hisparse_spec_phase("before-verify", self.ps.attn_dp_rank, batch)
-            batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
+            with spec_stage_span('verify'):
+                batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
             _log_hisparse_spec_phase("after-verify", self.ps.attn_dp_rank, batch)
             # Publish before draft_extend so the fence is at verify-end.
             if on_publish is not None:
