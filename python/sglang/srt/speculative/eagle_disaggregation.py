@@ -7,6 +7,7 @@ import torch
 from sglang.srt.layers.attention.dsa.utils import (
     should_remap_pd_dsa_seed_to_local_slots,
 )
+from sglang.srt.disaggregation.utils import get_dsa_seed_metadata_dim
 from sglang.srt.managers.overlap_utils import RelayPayload
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.runtime_context import get_spec
@@ -93,6 +94,11 @@ def build_eagle_disagg_draft_input(
         hidden_states=hidden_states,
         bonus_tokens=last_tokens_tensor,
         dsa_topk_indices=dsa_topk_indices,
+        cuda_graph_compatible=not (
+            spec.speculative_eagle_topk == 1
+            and get_dsa_seed_metadata_dim(batch.model_config.hf_config) > 0
+            and dsa_topk_indices is None
+        ),
     )
     spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
 
