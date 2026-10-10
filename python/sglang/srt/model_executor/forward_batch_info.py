@@ -440,6 +440,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
     # For DP attention
     is_extend_in_batch: bool = False
+    dp_spec_prefill_coordination_applied: bool = False
     can_run_dp_cuda_graph: bool = False
     can_run_dp_draft_cuda_graph: bool = False
     can_run_dp_breakable_cuda_graph: bool = False
@@ -677,6 +678,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         is_draft_worker: bool = False,
     ) -> None:
         """Populate per-rank token counts for DP-attention MLP synchronization."""
+        self.dp_spec_prefill_coordination_applied = (
+            batch.dp_spec_prefill_coordination_applied
+        )
         global_num_tokens_source = batch.global_num_tokens
         global_num_tokens_for_logprob_source = batch.global_num_tokens_for_logprob
         if is_draft_worker and batch.draft_global_num_tokens is not None:
@@ -689,7 +693,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return
 
         assert global_num_tokens_for_logprob_source is not None
-        if self.spec_info is not None:
+        if (
+            self.spec_info is not None
+            and not batch.dp_spec_prefill_coordination_applied
+        ):
             from sglang.srt.speculative.spec_info import spec_scale_global_num_tokens
 
             global_num_tokens, global_num_tokens_for_logprob = (
@@ -798,6 +805,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             # Scalar config / flags
             return_logprob=batch.return_logprob,
             is_extend_in_batch=batch.is_extend_in_batch,
+            dp_spec_prefill_coordination_applied=(
+                batch.dp_spec_prefill_coordination_applied
+            ),
             can_run_dp_cuda_graph=batch.can_run_dp_cuda_graph,
             can_run_dp_draft_cuda_graph=batch.can_run_dp_draft_cuda_graph,
             can_run_dp_breakable_cuda_graph=batch.can_run_dp_breakable_cuda_graph,
@@ -1017,17 +1027,23 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         )
 
     def moe_num_token_non_padded(self) -> Optional[torch.Tensor]:
-        """Return the valid local-row bound used by sparse MoE routing."""
-        from sglang.srt.layers.cp.base import get_cp_strategy
+        """Return a valid local-row bound for sparse MoE routing."""
+        from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
+        from sglang.srt.layers.communicator import ScatterMode, sparse_mlp_scatter_mode
 
+        if self.num_token_non_padded is None:
+            return None
+
+        mode = sparse_mlp_scatter_mode()
+        if mode == ScatterMode.SCATTERED:
+            return self.num_token_non_padded
         if (
-            get_parallel().moe_ep_size > 1
+            get_parallel().attn_cp_size > 1
             and self.attn_cp_metadata is not None
             and self.forward_mode.is_context_parallel_extend()
+            and dsa_use_prefill_cp(self)
         ):
-            strategy = get_cp_strategy()
-            if strategy is not None:
-                return strategy.moe_num_token_non_padded(self)
+            return None
         return self.num_token_non_padded
 
     def merge_mm_inputs(self) -> Optional[MultimodalInputs]:
@@ -1359,6 +1375,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             and max(global_num_tokens) <= max(prefill_cg.bs)
         ):
             dp_padding_mode = DpPaddingMode.MAX_LEN
+        if self.dp_spec_prefill_coordination_applied:
+            dp_padding_mode = DpPaddingMode.SUM_LEN
         self.dp_padding_mode = dp_padding_mode
 
         if dp_padding_mode.is_max_len():
