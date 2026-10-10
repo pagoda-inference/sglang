@@ -1016,6 +1016,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             num_tokens_per_dp=num_tokens_per_dp,
         )
 
+    def moe_num_token_non_padded(self) -> Optional[torch.Tensor]:
+        """Return the valid local-row bound used by sparse MoE routing."""
+        from sglang.srt.layers.cp.base import get_cp_strategy
+
+        if (
+            get_parallel().moe_ep_size > 1
+            and self.attn_cp_metadata is not None
+            and self.forward_mode.is_context_parallel_extend()
+        ):
+            strategy = get_cp_strategy()
+            if strategy is not None:
+                return strategy.moe_num_token_non_padded(self)
+        return self.num_token_non_padded
+
     def merge_mm_inputs(self) -> Optional[MultimodalInputs]:
         """
         Merge all multimodal inputs in the batch into a single MultiModalInputs object.

@@ -55,11 +55,24 @@ class InterleaveContextParallelMetadata(BaseContextParallelMetadata):
     per_rank_actual_token: Optional[List[int]] = None
     max_rank_len: Optional[List[int]] = None
     per_rank_logical_token: Optional[List[int]] = None
+    moe_local_token_count: Optional[torch.Tensor] = None
 
 
 class InterleaveCPStrategy(ContextParallelStrategy):
     name = "interleave"
     kind = ContextParallelStrategyKind.INTERLEAVE
+
+    def moe_num_token_non_padded(self, forward_batch):
+        """Mask physical CP padding before the dispatch/combine all-to-alls."""
+        metadata = forward_batch.attn_cp_metadata
+        if metadata.moe_local_token_count is None:
+            lengths = metadata.per_rank_logical_token or metadata.per_rank_actual_token
+            metadata.moe_local_token_count = torch.tensor(
+                lengths[self.cp_rank],
+                dtype=torch.int32,
+                device=forward_batch.input_ids.device,
+            )
+        return metadata.moe_local_token_count
 
     def can_apply(self, num_tokens: int, forward_batch) -> bool:
         if not forward_batch.forward_mode.is_context_parallel_extend():

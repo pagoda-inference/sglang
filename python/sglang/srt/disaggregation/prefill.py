@@ -617,6 +617,8 @@ class SchedulerDisaggregationPrefillMixin:
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
 
+            self._apply_war_barrier()
+
             # Get the next batch to run
             plan = self.get_next_disagg_prefill_batch_to_run(
                 running_batch=self.running_batch, last_batch=self.last_batch
@@ -633,7 +635,6 @@ class SchedulerDisaggregationPrefillMixin:
                 if self.enable_staging:
                     self.maybe_prefetch_staging_for_batch(batch)
                 batch_result = self.run_batch(batch)
-                self._apply_war_barrier()
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None
@@ -873,6 +874,21 @@ class SchedulerDisaggregationPrefillMixin:
                 if self.handle_pending_bootstrap(req, poll):
                     self.send_kv_chunk(req, last_chunk=True)
                     undone_reqs.append(req)
+                elif (
+                    poll == KVPoll.Bootstrapping
+                    and get_disagg().disaggregation_decode_allocation_policy
+                    != "prefill_complete"
+                    and self.req_to_token_pool.available_size() == 0
+                    and (
+                        self.waiting_queue
+                        or (
+                            self.disagg_prefill_bootstrap_queue.queue
+                            and self.req_to_metadata_buffer_idx_allocator.available_size()
+                            == 0
+                        )
+                    )
+                ):
+                    self.optimistic_release_and_requeue(req)
                 elif poll != KVPoll.Failed:
                     undone_reqs.append(req)
                 continue
@@ -1352,6 +1368,9 @@ class SchedulerDisaggregationPrefillMixin:
             )
             # Reset it so the next real bootstrap done can be recorded.
             req.time_stats.bootstrap_done_time = 0.0
+            maybe_release_metadata_buffer(
+                req, self.req_to_metadata_buffer_idx_allocator
+            )
             self.disagg_prefill_bootstrap_queue.queue.append(req)
         else:
             req.prefill_attempt_count += 1
