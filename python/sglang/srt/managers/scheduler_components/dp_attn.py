@@ -49,6 +49,8 @@ def _spec_input_cuda_graph_compatible(
         or local_batch.forward_mode.is_prebuilt()
     ):
         return True
+    if local_batch.force_disable_draft_cuda_graph:
+        return False
     spec_info = local_batch.spec_info
     return spec_info is None or spec_info.cuda_graph_compatible
 
