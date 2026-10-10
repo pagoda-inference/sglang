@@ -6745,6 +6745,18 @@ class ServerArgs:
         run_post_process_pass(self, _tp_lm_head_all_to_all_default)
         run_post_process_pass(self, _dp_lm_head_validation)
 
+        if resolved_view(self).enable_tp_lm_head_all_to_all:
+            self._disable_nccl_graph_buffer_registration()
+
+    @staticmethod
+    def _disable_nccl_graph_buffer_registration():
+        if os.environ.setdefault("NCCL_GRAPH_REGISTER", "0") != "0":
+            logger.warning(
+                "NCCL_GRAPH_REGISTER=%s was set explicitly; the graph-captured "
+                "TP LM-head all-to-all can deadlock with registered buffers.",
+                os.environ["NCCL_GRAPH_REGISTER"],
+            )
+
     def _handle_moe_kernel_config(self):
         # The quantization-driven runner resolutions moved to the pipeline
         # (arg_groups/overrides.py: _moe_runner_backend_quant_constraints);
