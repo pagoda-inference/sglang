@@ -236,6 +236,13 @@ def _update_gather_batch(
         batch.global_num_tokens_for_logprob = (
             mlp_sync_info.global_num_tokens_for_logprob
         )
+    if envs.SGLANG_ENABLE_DP_SPEC_PREFILL_COORDINATION.get():
+        batch.dp_spec_prefill_coordination_applied = False
+        batch.dp_spec_prefill_coordination_metadata = (
+            mlp_sync_info.global_num_tokens,
+            mlp_sync_info.global_num_tokens_for_logprob,
+            mlp_sync_info.tp0_info_cpu[:, 3],
+        )
     # Reuse the same all-gather result for a draft model whose A2A backend
     # requires a different local/full token-count representation.
     if draft_require_mlp_tp_gather is not None:

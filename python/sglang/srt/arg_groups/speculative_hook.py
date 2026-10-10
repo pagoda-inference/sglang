@@ -5,6 +5,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
+from sglang.srt.environ import envs
+
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
@@ -133,6 +135,12 @@ def handle_speculative_decoding(server_args: ServerArgs) -> None:
         assert server_args.speculative_algorithm == "EAGLE", (
             "--speculative-skip-dp-mlp-sync is only supported with "
             f"speculative_algorithm == EAGLE, got {server_args.speculative_algorithm}."
+        )
+
+    if envs.SGLANG_ENABLE_DP_SPEC_PREFILL_COORDINATION.get():
+        assert server_args.speculative_algorithm in ("EAGLE", "EAGLE3"), (
+            "DP spec/prefill coordination requires "
+            f"speculative_algorithm == EAGLE or EAGLE3, got {server_args.speculative_algorithm}."
         )
 
     if server_args.speculative_adaptive:

@@ -2182,6 +2182,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     draft_global_num_tokens: Optional[List[int]] = None
     draft_global_num_tokens_for_logprob: Optional[List[int]] = None
     global_spec_verify_tier_num_tokens: Optional[List[int]] = None
+    dp_spec_prefill_coordination_metadata: Optional[tuple] = None
+    dp_spec_prefill_coordination_applied: bool = False
 
     # === Compound crossing to ForwardBatch (carry their own device tensors) ===
     # Sampling info
@@ -3305,6 +3307,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             global_num_tokens_for_logprob=self.global_num_tokens_for_logprob,
             draft_global_num_tokens=self.draft_global_num_tokens,
             draft_global_num_tokens_for_logprob=self.draft_global_num_tokens_for_logprob,
+            dp_spec_prefill_coordination_metadata=self.dp_spec_prefill_coordination_metadata,
+            dp_spec_prefill_coordination_applied=self.dp_spec_prefill_coordination_applied,
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             can_run_dp_draft_cuda_graph=self.can_run_dp_draft_cuda_graph,
             can_run_dp_breakable_cuda_graph=self.can_run_dp_breakable_cuda_graph,

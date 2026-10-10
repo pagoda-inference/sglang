@@ -1637,6 +1637,10 @@ class MooncakeKVManager(CommonKVManager):
                         MooncakeRequestStage.MOONCAKE_WORKER_SEND.level,
                     )
 
+                if not kv_chunk.staging_counted:
+                    self._staging_outstanding[kv_chunk.room] += 1
+                    kv_chunk.staging_counted = True
+
                 if (
                     kv_chunk.room not in self.request_status
                     or self.check_status(kv_chunk.room) == KVPoll.Failed
@@ -1653,12 +1657,13 @@ class MooncakeKVManager(CommonKVManager):
                     self._staging_outstanding.pop(kv_chunk.room, None)
                     continue
 
-                self._wait_for_producer(kv_chunk)
-
-                # Count each chunk once; the flag survives re-enqueue on defer.
-                if not kv_chunk.staging_counted:
-                    self._staging_outstanding[kv_chunk.room] += 1
-                    kv_chunk.staging_counted = True
+                if kv_chunk.wait_event is not None:
+                    if (
+                        kv_chunk.room in self.request_status
+                        and self.check_status(kv_chunk.room) != KVPoll.Failed
+                    ):
+                        self._wait_for_producer(kv_chunk)
+                    kv_chunk.wait_event = None
 
                 if (
                     self.enable_staging
