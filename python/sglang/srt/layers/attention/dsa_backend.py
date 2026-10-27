@@ -2886,6 +2886,19 @@ class DeepseekSparseAttnBackend(
         flashmla_metadata = flashmla_metadata or metadata.flashmla_metadata
         assert flashmla_metadata is not None
 
+        if cache_seqlens.shape[0] != q_all.shape[0]:
+            if q_all.shape[0] % cache_seqlens.shape[0] != 0:
+                raise ValueError(
+                    "FlashMLA KV cannot map "
+                    f"{q_all.shape[0]} query tokens to {cache_seqlens.shape[0]} requests"
+                )
+            expansion = q_all.shape[0] // cache_seqlens.shape[0]
+            cache_seqlens = cache_seqlens.repeat_interleave(expansion)
+            flashmla_metadata = self._compute_flashmla_metadata(
+                cache_seqlens=cache_seqlens,
+                seq_len_q=1,
+            )
+
         # TODO the 2nd dim is seq_len_q, need to be >1 when MTP
         q_all = q_all.view(-1, 1, layer.tp_q_head_num, layer.head_dim)
         num_q_heads = q_all.shape[2]

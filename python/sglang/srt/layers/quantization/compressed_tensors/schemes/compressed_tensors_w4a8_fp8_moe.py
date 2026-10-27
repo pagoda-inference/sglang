@@ -22,6 +22,8 @@ from sglang.srt.utils import set_weight_attrs
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalDispatchOutput,
         StandardDispatchOutput,
     )
     from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
@@ -225,6 +227,23 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         w2_weight_scale = interleave_scales(w2_weight_scale)
         layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale, requires_grad=False)
 
+        layer.w13_input_scale = torch.nn.Parameter(
+            torch.zeros(1, dtype=torch.float32, device=device),
+            requires_grad=False,
+        )
+        layer.w2_input_scale = torch.nn.Parameter(
+            torch.zeros(1, dtype=torch.float32, device=device),
+            requires_grad=False,
+        )
+
+        if hasattr(layer, "dispatcher"):
+            layer.dispatcher.set_quant_config(
+                {
+                    "normal_dispatcher_output_dtype": "bf16",
+                    "low_latency_dispatcher_output_dtype": "fp8",
+                }
+            )
+
         layer.is_w4afp8_converted = True
 
     def create_moe_runner(
@@ -319,3 +338,85 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
         return StandardCombineInput(hidden_states=output)
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> torch.Tensor:
+        hidden_states, hidden_scales, topk_ids, _, masked_m, _ = dispatch_output
+        if hidden_scales is None:
+            raise RuntimeError(
+                "Compressed-tensors W4A8 DeepEP low-latency requires FP8 dispatcher output."
+            )
+
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import (
+            cutlass_w4a8_moe_deepep_ll,
+        )
+
+        layer.w13_input_scale.zero_()
+        layer.w2_input_scale.zero_()
+        return cutlass_w4a8_moe_deepep_ll(
+            hidden_states,
+            hidden_scales,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
+        )
+
+    def apply_deepep_normal(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> torch.Tensor:
+        hidden_states = dispatch_output.hidden_states
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+        if hidden_states.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "Compressed-tensors W4A8 DeepEP normal requires BF16 dispatcher output, "
+                f"but got {hidden_states.dtype}."
+            )
+        if hidden_states.shape[0] == 0:
+            return hidden_states
+
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import (
+            cutlass_w4a8_moe_deepep_normal,
+        )
+
+        return cutlass_w4a8_moe_deepep_normal(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            dispatch_output.topk_weights,
+            dispatch_output.topk_ids,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+        )

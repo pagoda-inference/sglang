@@ -156,7 +156,9 @@ class DeepEPMoE(FusedMoE):
             self.use_fp8_w8a8 = True
             self.fp8_dtype = torch.float8_e4m3fn
             self.use_w4afp8 = False
-        elif isinstance(quant_config, W4AFp8Config):
+        elif isinstance(quant_config, W4AFp8Config) or hasattr(
+            self, "w13_weight_packed"
+        ):
             self.use_w4afp8 = True
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
@@ -331,8 +333,11 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPNormalDispatchOutput,
     ):
         assert self.moe_runner_config.activation in ("silu", "situ")
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
-        return self.quant_method.apply_deepep_normal(
+        method = self.scheme if self.scheme is not None else self.quant_method
+        assert isinstance(method, W4AFp8MoEMethod) or hasattr(
+            method, "apply_deepep_normal"
+        )
+        return method.apply_deepep_normal(
             layer=self,
             dispatch_output=dispatch_output,
         )
@@ -342,8 +347,11 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPLLDispatchOutput,
     ):
         assert self.moe_runner_config.activation in ("silu", "situ")
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
-        return self.quant_method.apply_deepep_ll(
+        method = self.scheme if self.scheme is not None else self.quant_method
+        assert isinstance(method, W4AFp8MoEMethod) or hasattr(
+            method, "apply_deepep_ll"
+        )
+        return method.apply_deepep_ll(
             layer=self,
             dispatch_output=dispatch_output,
         )

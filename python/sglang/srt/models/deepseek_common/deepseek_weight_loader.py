@@ -308,6 +308,19 @@ class DeepseekV2WeightLoaderMixin:
                 ):
                     continue
 
+                # DeepSeek/GLM FP8 linear parameters use weight_scale_inv,
+                # while compressed-tensors checkpoints store weight_scale.
+                # Routed experts are excluded because their FusedMoE parameters
+                # intentionally retain the compressed-tensors naming.
+                if (
+                    name.endswith(".weight_scale")
+                    and ".mlp.experts." not in name
+                    and name not in params_dict
+                ):
+                    inv_name = name.removesuffix(".weight_scale") + ".weight_scale_inv"
+                    if inv_name in params_dict:
+                        name = inv_name
+
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     # Skip non-stacked layers and experts (experts handled below).
                     if weight_name not in name:
@@ -326,6 +339,14 @@ class DeepseekV2WeightLoaderMixin:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
+                    if (
+                        name.endswith(".weight_scale")
+                        and ".mlp.experts." not in name
+                        and name not in params_dict
+                    ):
+                        inv_name = name.removesuffix(".weight_scale") + ".weight_scale_inv"
+                        if inv_name in params_dict:
+                            name = inv_name
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     maybe_executor_submit(
@@ -426,8 +447,17 @@ class DeepseekV2WeightLoaderMixin:
                                         "fused_qkv_a_proj_with_mqa",
                                     )
                                 )
+                                if (
+                                    param_name.endswith(".weight_scale")
+                                    and param_name not in params_dict
+                                ):
+                                    inv_name = (
+                                        param_name.removesuffix(".weight_scale")
+                                        + ".weight_scale_inv"
+                                    )
+                                    if inv_name in params_dict:
+                                        param_name = inv_name
                                 param = params_dict[param_name]
-
                                 weight_loader = getattr(
                                     param, "weight_loader", default_weight_loader
                                 )

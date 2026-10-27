@@ -45,6 +45,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Nvfp4MoE,
     CompressedTensorsW4AFP8MoE,
+    CompressedTensorsW4A8Int8TritonMoE,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Fp8MoE,
     CompressedTensorsW8A8Int8,
@@ -168,7 +169,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             # If linear_fp8_config is set, use FP8 for linear layers
             # This allows mixed quantization: experts with int4, linear layers with fp8
-            if self.linear_fp8_config is not None:
+            # The explicit ignore list must still win; mixed-precision checkpoints
+            # can keep selected linear layers in BF16 beside this FP8 fast path.
+            if self.linear_fp8_config is not None and not should_ignore_layer(
+                prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+            ):
                 return Fp8LinearMethod(self.linear_fp8_config)
             scheme = self.get_linear_scheme(layer=layer, layer_name=prefix)
             if scheme is None:
@@ -465,7 +470,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and weight_quant.symmetric
             and not weight_quant.dynamic
             and input_quant.num_bits == 8
-            and input_quant.type in [QuantizationType.FLOAT, QuantizationType.INT]
+            and input_quant.type == QuantizationType.FLOAT
             and input_quant.dynamic  # currently not support static input scales
         )
 
@@ -878,6 +883,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             if _is_npu:
                 logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoE")
                 return NPUCompressedTensorsW4A8Int8DynamicMoE(self)
+            if _is_cuda:
+                logger.info_once(
+                    "Using CompressedTensorsW4A8Int8TritonMoE (exact INT8 fallback)"
+                )
+                return CompressedTensorsW4A8Int8TritonMoE(self, weight_quant)
             else:
                 raise NotImplementedError(
                     f"The W4A8Int8 Fused MoE scheme is implemented only for NPU for now."

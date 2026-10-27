@@ -350,7 +350,11 @@ def cutlass_w4a8_moe_deepep_normal(
     gateup_input = torch.empty(
         gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), True)
+    if a1_scale is None:
+        a1_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale, False)
+    else:
+        per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), True)
     del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
     local_topk_ids = (
@@ -394,7 +398,13 @@ def cutlass_w4a8_moe_deepep_normal(
     intermediate_q = torch.empty(
         intermediate.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
+    if a2_scale is None:
+        a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        silu_mul_dynamic_tensorwise_quant_for_cutlass_moe(
+            intermediate, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n
+        )
+    else:
+        per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
 
     cutlass_w4a8_moe_mm(
         c2,

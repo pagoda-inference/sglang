@@ -19,8 +19,12 @@ import torch
 from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
     CompressedTensorsConfig,
 )
+from sglang.srt.layers.quantization.compressed_tensors import (
+    compressed_tensors as compressed_tensors_module,
+)
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4AFP8MoE,
+    CompressedTensorsW4A8Int8TritonMoE,
     CompressedTensorsWNA16,
 )
 from sglang.srt.layers.quantization.compressed_tensors.utils import (
@@ -297,6 +301,32 @@ class TestW4AFP8MixedPrecision(CustomTestCase):
         self.assertEqual(scheme.group_size, 128)
         self.assertEqual(scheme.packed_factor, 32 // 4)
 
+    def test_int8_activation_routes_to_exact_cuda_fallback(self):
+        int8_group = dict(W4A8_GROUP)
+        int8_group["input_activations"] = {
+            **int8_group["input_activations"],
+            "type": "int",
+        }
+        quant_config = CompressedTensorsConfig.from_config(
+            _mixed_precision_config(int8_group, FP8_BLOCK_GROUP)
+        )
+        scheme_dict = quant_config.target_scheme_map[W4A8_TARGET]
+
+        self.assertFalse(
+            quant_config._is_wint4afp8(
+                scheme_dict["weights"],
+                scheme_dict["input_activations"],
+                scheme_dict["format"],
+            )
+        )
+        with mock.patch.object(compressed_tensors_module, "_is_cuda", True):
+            scheme = quant_config.get_moe_scheme(
+                torch.nn.Module(),
+                "model.layers.0.mlp.experts",
+            )
+
+        self.assertIsInstance(scheme, CompressedTensorsW4A8Int8TritonMoE)
+
     def test_shared_experts_fusion_refused_on_precision_mismatch(self):
         # Folding block-FP8 shared experts into the INT4 routed-expert kernel
         # would load them through the wrong scheme.
@@ -319,6 +349,45 @@ class TestW4AFP8MixedPrecision(CustomTestCase):
             )
         )
         self.assertFalse(quant_config.can_fuse_shared_expert())
+
+    def test_linear_fp8_fast_path_honors_ignore(self):
+        config = _mixed_precision_config(
+            W4A8_GROUP,
+            ignore=["re:.*\\.self_attn\\.kv_b_proj$"],
+        )
+        config["linear_fp8_config"] = {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+        }
+        quant_config = CompressedTensorsConfig.from_config(config)
+
+        class LinearStub:
+            pass
+
+        with (
+            mock.patch("sglang.srt.layers.linear.LinearBase", LinearStub),
+            mock.patch.object(
+                compressed_tensors_module, "Fp8LinearMethod", return_value="fp8"
+            ) as fp8_method,
+            mock.patch.object(
+                compressed_tensors_module,
+                "UnquantizedLinearMethod",
+                return_value="bf16",
+            ) as unquantized_method,
+        ):
+            ignored = quant_config.get_quant_method(
+                LinearStub(), "model.layers.0.self_attn.kv_b_proj"
+            )
+            quantized = quant_config.get_quant_method(
+                LinearStub(), "model.layers.0.self_attn.q_b_proj"
+            )
+
+        self.assertEqual(ignored, "bf16")
+        self.assertEqual(quantized, "fp8")
+        unquantized_method.assert_called_once_with()
+        fp8_method.assert_called_once_with(quant_config.linear_fp8_config)
 
 
 if __name__ == "__main__":
