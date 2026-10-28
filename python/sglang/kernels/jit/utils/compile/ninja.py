@@ -113,7 +113,7 @@ def generate(spec: BuildSpec) -> str:
         '  command = $nvcc -MD -MF "$out.d" $cudaflags -c "$in" -o "$out"',
         "",
         "rule link",
-        '  command = $cxx $in $ldflags -o "$out"',
+        '  command = $cxx $in $ldflags -o $out',
         "",
     ]
 

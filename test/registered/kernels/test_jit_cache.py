@@ -428,6 +428,28 @@ def test_generated_ninja_asks_both_compilers_for_dependencies():
     assert all('-MD -MF "$out.d"' in line for line in compile_commands)
 
 
+def test_link_rule_lets_ninja_escape_the_output_path():
+    """Do not quote ``$out`` in addition to Ninja's own shell escaping.
+
+    Template-derived module names can contain shell-sensitive characters such
+    as ``LinearKVTransferPolicy<656>``. Quoting an already-expanded Ninja path
+    makes the linker create a filename containing literal quote characters,
+    while the loader looks for the unquoted path.
+    """
+    text = ninja.generate(
+        _spec(
+            module_args=("LinearKVTransferPolicy<656>",),
+            cuda_wrappers=(("run", "Kernel::run"),),
+        )
+    )
+    link_rule = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("  command = $cxx $in $ldflags ")
+    )
+    assert link_rule == "  command = $cxx $in $ldflags -o $out"
+
+
 def test_pure_cpp_module_does_not_link_the_gpu_runtime():
     """A module with no `.cu` sources must not ask the linker for libcudart.
 
