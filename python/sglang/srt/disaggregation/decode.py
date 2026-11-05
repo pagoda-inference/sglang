@@ -84,6 +84,7 @@ from sglang.srt.mem_cache.memory_pool import (
     KVCache,
     ReqToTokenPool,
 )
+from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.observability.req_time_stats import (
     set_schedule_time_batch,
@@ -341,6 +342,11 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         self.pp_size = scheduler.ps.pp_size
         self.num_reserved_decode_tokens = num_reserved_decode_tokens
         self.transfer_backend = transfer_backend
+        self._hisparse_transfer_reserve_buffers = (
+            parse_hisparse_config(scheduler.server_args).transfer_reserve_buffers
+            if scheduler.enable_hisparse
+            else 0
+        )
         # Queue for requests pending pre-allocation
         self.queue: List[DecodeRequest] = []
         self.retracted_queue: List[Req] = []
@@ -1027,6 +1033,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 0,
                 hisparse_avail // self.scheduler.hisparse_coordinator.padded_buffer_size
                 - self._hisparse_pending_device_requests(),
+                - self._hisparse_transfer_reserve_buffers,
             )
 
         # Then, preallocate the remaining requests if possible

@@ -79,6 +79,7 @@ def _parse_sparse_config(server_args) -> SparseConfig:
     device_buffer_size = extra_config.pop("device_buffer_size", 2 * top_k)
     host_to_device_ratio = extra_config.pop("host_to_device_ratio", 2)
     swap_in_block_size = extra_config.pop("swap_in_block_size", 960)
+    transfer_reserve_buffers = extra_config.pop("transfer_reserve_buffers", 0)
 
     if device_buffer_size < top_k:
         raise ValueError(
@@ -92,6 +93,15 @@ def _parse_sparse_config(server_args) -> SparseConfig:
         raise ValueError(
             f"swap_in_block_size ({swap_in_block_size}) must be in the range [1, 1024]"
         )
+    if (
+        not isinstance(transfer_reserve_buffers, int)
+        or isinstance(transfer_reserve_buffers, bool)
+        or transfer_reserve_buffers < 0
+    ):
+        raise ValueError(
+            "transfer_reserve_buffers must be a non-negative integer, got "
+            f"{transfer_reserve_buffers!r}"
+        )
 
     algorithm = extra_config.pop("algorithm", None)
     backend = extra_config.pop("backend", None)
@@ -103,6 +113,7 @@ def _parse_sparse_config(server_args) -> SparseConfig:
         device_buffer_size=device_buffer_size,
         host_to_device_ratio=host_to_device_ratio,
         swap_in_block_size=swap_in_block_size,
+        transfer_reserve_buffers=transfer_reserve_buffers,
         algorithm=algorithm,
         backend=backend,
         page_size=page_size,

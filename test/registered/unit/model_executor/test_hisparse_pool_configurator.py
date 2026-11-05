@@ -82,15 +82,19 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
                 self.assertEqual(cell_size, expected_cell_size)
 
     def _make_hisparse_sizing_configurator(
-        self, *, host_to_device_ratio: int
+        self, *, host_to_device_ratio: int, transfer_reserve_buffers: int = 0
     ) -> DefaultPoolConfigurator:
         configurator = object.__new__(DefaultPoolConfigurator)
         configurator.use_hisparse_memory_config = True
         configurator._main_kv_size = 1024
         configurator._indexer_kv_base_size = 128
+        configurator._dense_draft_kv_size = 64
         configurator._hisparse_device_buffer_size = 4096
         configurator._hisparse_host_to_device_ratio = host_to_device_ratio
         configurator._hisparse_max_running_requests = 32
+        configurator._hisparse_transfer_reserve_buffers = transfer_reserve_buffers
+        configurator._hisparse_hot_buffer_requests = 32 + transfer_reserve_buffers
+        configurator._hisparse_spec_plan = None
         return configurator
 
     def test_hisparse_ratio_expands_logical_capacity(self):
@@ -115,12 +119,28 @@ class TestHiSparsePoolConfigurator(CustomTestCase):
             1_000_000, page_size=64
         )
 
-        self.assertEqual(config.max_total_num_tokens, 999_936)
+        self.assertEqual(config.max_total_num_tokens, 1_000_000)
         self.assertEqual(config.hisparse_device_num_tokens, (4096 + 64) * 32)
+
+    def test_hisparse_transfer_reserve_expands_device_hot_buffer(self):
+        configurator = self._make_hisparse_sizing_configurator(
+            host_to_device_ratio=2,
+            transfer_reserve_buffers=1,
+        )
+
+        configured = configurator.calculate_pool_sizes(32 * (1 << 30), page_size=64)
+        constrained = configurator.calculate_pool_sizes_from_max_tokens(
+            1_000_000, page_size=64
+        )
+
+        expected_hot_tokens = (4096 + 64) * (32 + 1)
+        self.assertEqual(configured.hisparse_device_num_tokens, expected_hot_tokens)
+        self.assertEqual(constrained.hisparse_device_num_tokens, expected_hot_tokens)
 
     def test_hisparse_hot_buffer_supports_one_dp_worker_warmup(self):
         configurator = self._make_hisparse_sizing_configurator(host_to_device_ratio=2)
         configurator._hisparse_max_running_requests = 1
+        configurator._hisparse_hot_buffer_requests = 1
 
         config = configurator.calculate_pool_sizes(32 * (1 << 30), page_size=64)
 

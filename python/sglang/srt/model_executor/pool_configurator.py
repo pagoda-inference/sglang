@@ -192,6 +192,9 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             )
             self._hisparse_device_buffer_size = hisparse_config.device_buffer_size
             self._hisparse_host_to_device_ratio = hisparse_config.host_to_device_ratio
+            self._hisparse_transfer_reserve_buffers = (
+                hisparse_config.transfer_reserve_buffers
+            )
             max_running_requests = get_schedule().max_running_requests
             if max_running_requests is None:
                 raise RuntimeError(
@@ -199,6 +202,10 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 )
             self._hisparse_max_running_requests = max(
                 max_running_requests // kvc.ps.attn_dp_size, 1
+            )
+            self._hisparse_hot_buffer_requests = (
+                self._hisparse_max_running_requests
+                + self._hisparse_transfer_reserve_buffers
             )
         has_kv_on_another_pp_stage = (
             self._cell_size == 0
@@ -470,7 +477,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
             host_to_device_ratio = self._hisparse_host_to_device_ratio
             hot_tokens = (
                 self._hisparse_device_buffer_size + page_size
-            ) * self._hisparse_max_running_requests
+            ) * self._hisparse_hot_buffer_requests
             hot_tokens = ceil_align(hot_tokens, page_size)
             hisparse_spec_fixed_bytes = 0
             if self._hisparse_spec_plan is not None:
@@ -478,7 +485,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     self._hisparse_spec_plan.layout.fixed_state_bytes(
                         num_layers=self._hisparse_num_layers,
                         num_req_slots=(
-                            self._hisparse_max_running_requests
+                            self._hisparse_hot_buffer_requests
                             + self._hisparse_extra_req_slots
                             + 1
                         ),
@@ -543,7 +550,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
         if self.use_hisparse_memory_config:
             hot_tokens = (
                 self._hisparse_device_buffer_size + page_size
-            ) * self._hisparse_max_running_requests
+            ) * self._hisparse_hot_buffer_requests
             hot_tokens = ceil_align(hot_tokens, page_size)
             min_logical_tokens = hot_tokens * self._hisparse_host_to_device_ratio
             if max_total_num_tokens < min_logical_tokens:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import (
@@ -1773,7 +1775,7 @@ class Req(ReqDllmMixin):
             },
             "return_logprob": False,
             "stream": False,
-            "rid": self.rid,
+            "rid": f"{self.rid}:pd-rebootstrap:{uuid.uuid4().hex}",
             "bootstrap_host": self.bootstrap_host,
             "bootstrap_port": self.bootstrap_port,
             "bootstrap_room": self.bootstrap_room,
