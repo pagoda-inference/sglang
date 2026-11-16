@@ -143,7 +143,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
         override.install()
         self.addCleanup(override.restore)
 
-    def test_missing_seed_cuda_graph_fallback(self):
+    def test_missing_seed_keeps_cuda_graph(self):
         graph_result = (
             [],
             torch.zeros((1, 1), dtype=torch.long, device=DEVICE),
@@ -160,7 +160,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
         )
 
         for seed_enabled, seed_present, expect_graph in (
-            (True, False, False),
+            (True, False, True),
             (True, True, True),
             (False, False, True),
         ):
@@ -180,6 +180,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
                 worker.device = DEVICE
                 worker.tree_mask_mode = None
                 worker.seed_dsa_topk_from_draft_extend = seed_enabled
+                worker.dsa_index_topk = 1
                 worker.index_share_for_mtp_iteration = True
                 forward_batch = SimpleNamespace(forward_mode=ForwardMode.DECODE)
                 worker.draft_forward = MagicMock(return_value=graph_result)
@@ -192,6 +193,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
                 )
                 draft_input = SimpleNamespace(
                     bonus_tokens=torch.zeros((1,), dtype=torch.long, device=DEVICE),
+                    hidden_states=torch.empty((1, 1), device=DEVICE),
                     dsa_topk_indices=(
                         torch.ones((1, 1), dtype=torch.int32, device=DEVICE)
                         if seed_present

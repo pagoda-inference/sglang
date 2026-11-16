@@ -9,6 +9,8 @@ from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
 )
 from sglang.srt.speculative.eagle_info import EagleDraftInput
+from sglang.srt.speculative import eagle_worker_v2
+from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker
 from sglang.srt.speculative.eagle_worker_v2 import (
     EAGLEWorkerV2,
     _slice_draft_output_to_local_tokens,
@@ -60,15 +62,15 @@ class TestEaglePDDPFallback(CustomTestCase):
         forward_batch.can_run_dp_draft_cuda_graph = True
         self.assertTrue(runner.can_run_graph(forward_batch))
 
-    def test_seedless_pd_draft_requests_rank_consistent_eager_forward(self):
+    def test_seedless_pd_draft_requests_rank_consistent_graph_forward(self):
         worker = object.__new__(EAGLEWorkerV2)
         worker._draft_worker = SimpleNamespace(seed_dsa_topk_from_draft_extend=True)
 
-        for seed, future_indices, future_seed, expect_eager in (
-            (None, None, False, True),
-            (torch.ones((1, 1)), None, False, False),
-            (torch.ones((1, 1)), torch.tensor([1]), False, True),
-            (None, torch.tensor([1]), True, False),
+        for seed, future_indices, future_seed in (
+            (None, None, False),
+            (torch.ones((1, 1)), None, False),
+            (torch.ones((1, 1)), torch.tensor([1]), False),
+            (None, torch.tensor([1]), True),
         ):
             with self.subTest(
                 seed_present=seed is not None,
@@ -84,7 +86,7 @@ class TestEaglePDDPFallback(CustomTestCase):
                 )
                 self.assertEqual(
                     worker.requires_dp_attention_eager_forward(batch),
-                    expect_eager,
+                    False,
                 )
 
         worker._draft_worker.seed_dsa_topk_from_draft_extend = False
@@ -94,7 +96,52 @@ class TestEaglePDDPFallback(CustomTestCase):
             )
         )
 
-    def test_seeded_running_batch_merged_with_seedless_prebuilt_forces_eager(self):
+    def test_seedless_pd_draft_input_gets_zero_seed_and_keeps_graph(self):
+        worker = object.__new__(EagleDraftWorker)
+        worker.speculative_num_steps = 3
+        worker.dsa_index_topk = 2
+        worker.seed_dsa_topk_from_draft_extend = True
+        worker.req_to_token_pool = object()
+        worker.topk = 1
+        worker.speculative_num_draft_tokens = 4
+        worker.tree_mask_mode = object()
+        worker.device = torch.device("cpu")
+        worker.target_worker = object()
+        worker.draft_runner = SimpleNamespace(canary_manager=None)
+        worker.cuda_graph_runner = SimpleNamespace(
+            execute=lambda _: (None, None, None, None)
+        )
+        draft_input = SimpleNamespace(
+            hidden_states=torch.empty((3, 4)),
+            dsa_topk_indices=None,
+        )
+        forward_batch = SimpleNamespace(
+            forward_mode=SimpleNamespace(is_idle=lambda: False)
+        )
+
+        original_prepare_for_draft = eagle_worker_v2.prepare_for_draft
+        original_build_eagle_verify_input = eagle_worker_v2.build_eagle_verify_input
+        eagle_worker_v2.prepare_for_draft = lambda *args, **kwargs: (
+            forward_batch,
+            True,
+        )
+        eagle_worker_v2.build_eagle_verify_input = lambda *args, **kwargs: object()
+        try:
+            worker.draft(SimpleNamespace(spec_info=draft_input))
+        finally:
+            eagle_worker_v2.prepare_for_draft = original_prepare_for_draft
+            eagle_worker_v2.build_eagle_verify_input = (
+                original_build_eagle_verify_input
+            )
+
+        self.assertEqual(
+            draft_input.dsa_topk_indices.shape,
+            (3, worker.dsa_index_topk),
+        )
+        self.assertEqual(draft_input.dsa_topk_indices.dtype, torch.int32)
+        self.assertTrue(torch.count_nonzero(draft_input.dsa_topk_indices) == 0)
+
+    def test_seeded_running_batch_merged_with_seedless_prebuilt_keeps_graph(self):
         worker = object.__new__(EAGLEWorkerV2)
         worker._draft_worker = SimpleNamespace(seed_dsa_topk_from_draft_extend=True)
 
@@ -112,7 +159,7 @@ class TestEaglePDDPFallback(CustomTestCase):
 
         self.assertFalse(running_input.future_dsa_topk_indices_available)
         self.assertIsNotNone(running_input.dsa_topk_indices)
-        self.assertTrue(
+        self.assertFalse(
             worker.requires_dp_attention_eager_forward(
                 SimpleNamespace(spec_info=running_input)
             )
