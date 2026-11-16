@@ -536,7 +536,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             and self.seed_dsa_topk_from_draft_extend
             and draft_input.dsa_topk_indices is None
         ):
-            can_run_decode_cuda_graph = False
+            draft_input.dsa_topk_indices = torch.zeros(
+                (draft_input.hidden_states.shape[0], self.dsa_index_topk),
+                dtype=torch.int32,
+                device=draft_input.hidden_states.device,
+            )
 
         n_inner = self.speculative_num_steps - 1
         canary_outside_ctx = (
@@ -1094,18 +1098,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
         return self._draft_worker.draft_runner
 
     def requires_dp_attention_eager_forward(self, batch: ScheduleBatch) -> bool:
-        if not self._draft_worker.seed_dsa_topk_from_draft_extend:
-            return False
-
-        draft_input = batch.spec_info
-        if draft_input is None:
-            return False
-
-        if getattr(draft_input, "future_indices", None) is not None:
-            has_seed = getattr(draft_input, "future_dsa_topk_indices_available", False)
-        else:
-            has_seed = getattr(draft_input, "dsa_topk_indices", None) is not None
-        return not has_seed
+        return False
 
     @property
     def spec_v2_attn_backends(self) -> tuple:
